@@ -1,0 +1,333 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Log Monitoring Agent — Full Stack
+#
+# Phase 1: Ingestion  — Fluent Bit → Kafka
+# Phase 2: Storage    — 3-node KRaft Kafka cluster + Kafka Connect → S3 archive
+#
+# Services
+# ─────────────────────────────────────────────────────────────────────────────
+#   kafka-{1,2,3}    KRaft broker+controller (no ZooKeeper)
+#   kafka-init       One-shot topic + ACL bootstrap (exits 0)
+#   kafka-ui         Provectus Kafka UI  — http://localhost:8080
+#   kafka-connect    Confluent CP Connect worker with S3 sink
+#   connect-init     One-shot connector deployment (exits 0)
+#   localstack       AWS S3 emulation    — http://localhost:4566
+#   fluent-bit       Log collector / normaliser
+#   log-generator    Synthetic load (dev/test only — remove in production)
+#
+# Quick start:
+#   cp .env.example .env && docker compose up --build -d
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "3.9"
+
+# ── Shared Kafka broker config ─────────────────────────────────────────────────
+# YAML anchors keep the three broker definitions DRY.  Each broker overrides
+# only NODE_ID and ADVERTISED_LISTENERS.
+x-kafka-common: &kafka-common
+  image: bitnami/kafka:3.7
+  restart: unless-stopped
+  networks:
+    - monitoring
+  environment: &kafka-env
+    # All three nodes must share the same cluster ID.
+    # Generate a fresh one for production: kafka-storage.sh random-uuid
+    KAFKA_KRAFT_CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+    KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+    KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+    KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+    KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+    # ── Replication / durability ─────────────────────────────────────────────
+    # All three values must be consistent; kafka-init overrides per-topic.
+    KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+    KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "3"
+    KAFKA_CFG_MIN_INSYNC_REPLICAS: "2"
+    KAFKA_CFG_NUM_PARTITIONS: "12"
+    KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+    KAFKA_CFG_OFFSETS_TOPIC_NUM_PARTITIONS: "50"
+    KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+    KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+    # ── Retention defaults (overridden per-topic by init-topics.sh) ──────────
+    KAFKA_CFG_LOG_RETENTION_HOURS: "168"
+    KAFKA_CFG_LOG_RETENTION_BYTES: "-1"
+    KAFKA_CFG_LOG_SEGMENT_BYTES: "536870912"
+    KAFKA_CFG_LOG_SEGMENT_MS: "3600000"
+    # ── Performance ─────────────────────────────────────────────────────────
+    KAFKA_CFG_SOCKET_REQUEST_MAX_BYTES: "104857600"
+    KAFKA_CFG_MESSAGE_MAX_BYTES: "1048576"
+    KAFKA_CFG_REPLICA_FETCH_MAX_BYTES: "1048576"
+    KAFKA_CFG_NUM_IO_THREADS: "8"
+    KAFKA_CFG_NUM_NETWORK_THREADS: "3"
+    KAFKA_CFG_SOCKET_SEND_BUFFER_BYTES: "102400"
+    KAFKA_CFG_SOCKET_RECEIVE_BUFFER_BYTES: "102400"
+    # ── Consumer group ───────────────────────────────────────────────────────
+    # 3 s delay on first rebalance avoids thundering-herd at cluster start.
+    KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS: "3000"
+    KAFKA_CFG_GROUP_MAX_SESSION_TIMEOUT_MS: "300000"
+    # ── Safety ──────────────────────────────────────────────────────────────
+    # Never elect an out-of-sync replica as leader — prefer brief unavailability
+    # over data loss.
+    KAFKA_CFG_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+    ALLOW_PLAINTEXT_LISTENER: "yes"
+  healthcheck:
+    # kafka-broker-api-versions.sh is a lightweight TCP handshake, not a JVM
+    # cold-start. It reliably returns non-zero if the broker is not accepting
+    # connections, so it's safe for depends_on: condition: service_healthy.
+    test:
+      - CMD-SHELL
+      - kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1
+    interval: 10s
+    timeout: 15s
+    retries: 18
+    start_period: 45s
+
+services:
+
+  # ── Kafka broker 1 (controller + broker) ──────────────────────────────────
+  kafka-1:
+    <<: *kafka-common
+    container_name: kafka-1
+    ports:
+      - "127.0.0.1:9092:9092"   # Only broker-1 exposed locally; clients use bootstrap list
+    environment:
+      <<: *kafka-env
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-1:9092"
+    volumes:
+      - kafka_1_data:/bitnami/kafka
+
+  # ── Kafka broker 2 ────────────────────────────────────────────────────────
+  kafka-2:
+    <<: *kafka-common
+    container_name: kafka-2
+    environment:
+      <<: *kafka-env
+      KAFKA_CFG_NODE_ID: "2"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-2:9092"
+    volumes:
+      - kafka_2_data:/bitnami/kafka
+
+  # ── Kafka broker 3 ────────────────────────────────────────────────────────
+  kafka-3:
+    <<: *kafka-common
+    container_name: kafka-3
+    environment:
+      <<: *kafka-env
+      KAFKA_CFG_NODE_ID: "3"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-3:9092"
+    volumes:
+      - kafka_3_data:/bitnami/kafka
+
+  # ── Topic + ACL bootstrap (idempotent) ────────────────────────────────────
+  kafka-init:
+    image: bitnami/kafka:3.7
+    container_name: kafka-init
+    depends_on:
+      kafka-1: { condition: service_healthy }
+      kafka-2: { condition: service_healthy }
+      kafka-3: { condition: service_healthy }
+    command: bash /scripts/init-topics.sh
+    volumes:
+      - ./kafka/scripts/init-topics.sh:/scripts/init-topics.sh:ro
+    environment:
+      BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+    networks:
+      - monitoring
+    restart: "no"
+
+  # ── Kafka UI ───────────────────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      kafka-1: { condition: service_healthy }
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local-3node
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      LOGGING_LEVEL_ROOT: WARN
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ── LocalStack — S3 archive target ────────────────────────────────────────
+  localstack:
+    image: localstack/localstack:3.4
+    container_name: localstack
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: s3
+      DEBUG: "0"
+      PERSISTENCE: "1"
+      # Fast-path: skip TLS, use path-style addressing (required for most S3 clients)
+      S3_SKIP_SIGNATURE_VALIDATION: "1"
+    volumes:
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      # /ready returns 200 only once all declared SERVICES are initialised
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ── Kafka Connect (distributed mode) ─────────────────────────────────────
+  kafka-connect:
+    build:
+      context: ./kafka/connect
+      dockerfile: Dockerfile
+    image: log-agent/kafka-connect:latest
+    container_name: kafka-connect
+    ports:
+      - "127.0.0.1:8083:8083"
+    depends_on:
+      kafka-1:    { condition: service_healthy }
+      kafka-2:    { condition: service_healthy }
+      kafka-3:    { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+      localstack: { condition: service_healthy }
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS:                     kafka-1:9092,kafka-2:9092,kafka-3:9092
+      CONNECT_REST_PORT:                             "8083"
+      CONNECT_REST_ADVERTISED_HOST_NAME:             kafka-connect
+      CONNECT_GROUP_ID:                              log-pipeline-connect-v1
+      # Internal topics — pre-created by kafka-init with correct replication/compaction.
+      CONNECT_CONFIG_STORAGE_TOPIC:                  _connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC:                  _connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC:                  _connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR:     "3"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR:     "3"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR:     "3"
+      CONNECT_OFFSET_STORAGE_PARTITIONS:             "25"
+      CONNECT_STATUS_STORAGE_PARTITIONS:             "5"
+      # Converters: messages are raw bytes (Fluent Bit → JSON bytes → Kafka).
+      # ByteArrayConverter avoids any schema-registry dependency.
+      CONNECT_KEY_CONVERTER:                         org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER:                       org.apache.kafka.connect.converters.ByteArrayConverter
+      CONNECT_INTERNAL_KEY_CONVERTER:                org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_VALUE_CONVERTER:              org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_INTERNAL_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH:                           /usr/share/java,/usr/share/confluent-hub-components
+      CONNECT_LOG4J_ROOT_LOGLEVEL:                   WARN
+      CONNECT_LOG4J_LOGGERS:                         "org.apache.kafka.connect.runtime.rest=WARN,org.reflections=ERROR"
+      # S3 credentials for LocalStack (test values; override in production)
+      AWS_ACCESS_KEY_ID:     test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION:    us-east-1
+    healthcheck:
+      # Connect REST API — returns 200 + JSON array once the worker is ready
+      test: ["CMD", "curl", "-sf", "http://localhost:8083/connectors"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ── Connector bootstrap (idempotent PUT to Connect REST API) ─────────────
+  connect-init:
+    image: curlimages/curl:8.9.1
+    container_name: connect-init
+    user: root
+    depends_on:
+      kafka-connect: { condition: service_healthy }
+      localstack:    { condition: service_healthy }
+    environment:
+      KAFKA_CONNECT_URL: http://kafka-connect:8083
+      LOCALSTACK_URL:    http://localstack:4566
+      S3_BUCKET:         log-archive
+    volumes:
+      - ./kafka/connect/deploy-connectors.sh:/deploy.sh:ro
+      - ./kafka/connect:/connectors:ro
+    command: sh /deploy.sh
+    networks:
+      - monitoring
+    restart: "no"
+
+  # ── Fluent Bit ─────────────────────────────────────────────────────────────
+  fluent-bit:
+    build:
+      context: ./fluent-bit
+      dockerfile: Dockerfile
+    image: log-agent/fluent-bit:latest
+    container_name: fluent-bit
+    depends_on:
+      kafka-1:    { condition: service_healthy }
+      kafka-2:    { condition: service_healthy }
+      kafka-3:    { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+    ports:
+      - "0.0.0.0:5170:5170/tcp"
+      - "0.0.0.0:5171:5171/udp"
+      - "0.0.0.0:5140:5140/tcp"
+      - "127.0.0.1:2020:2020/tcp"
+    environment:
+      HOSTNAME:      ${HOSTNAME:-localhost}
+      ENVIRONMENT:   ${ENVIRONMENT:-local}
+      SERVICE_NAME:  ${SERVICE_NAME:-unknown}
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      FLB_LOG_LEVEL: ${FLB_LOG_LEVEL:-info}
+    volumes:
+      - ./fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+      - ./fluent-bit/lua:/fluent-bit/etc/lua:ro
+      - app_logs:/var/log/app:ro
+      - fluent_bit_state:/var/log/fluent-bit
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ── Log generator (dev / load test only) ──────────────────────────────────
+  log-generator:
+    build:
+      context: ./log-generator
+      dockerfile: Dockerfile
+    image: log-agent/log-generator:latest
+    container_name: log-generator
+    depends_on:
+      fluent-bit: { condition: service_healthy }
+    environment:
+      FLUENT_BIT_TCP_HOST: fluent-bit
+      FLUENT_BIT_TCP_PORT: "5170"
+      SERVICE_NAME:        ${SERVICE_NAME:-test-service}
+      LOG_RATE:            ${LOG_RATE:-200}
+      LOG_DIR:             /var/log/app
+    volumes:
+      - app_logs:/var/log/app
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
+volumes:
+  kafka_1_data:     { driver: local }
+  kafka_2_data:     { driver: local }
+  kafka_3_data:     { driver: local }
+  localstack_data:  { driver: local }
+  fluent_bit_state: { driver: local }
+  app_logs:         { driver: local }
+
+# ── Networks ───────────────────────────────────────────────────────────────────
+networks:
+  monitoring:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
