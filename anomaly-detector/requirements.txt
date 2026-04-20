@@ -1,0 +1,6 @@
+redis==5.0.8
+scikit-learn==1.5.1
+joblib==1.4.2
+kafka-python==2.0.2
+fakeredis==2.23.2
+pytest==8.2.2
