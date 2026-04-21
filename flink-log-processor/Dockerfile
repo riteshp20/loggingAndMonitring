@@ -1,5 +1,5 @@
 # ── Stage 1: Build fat JAR ────────────────────────────────────────────────────
-FROM maven:3.9.6-eclipse-temurin-17 AS build
+FROM maven:3.9.13-eclipse-temurin-25 AS build
 
 WORKDIR /build
 
