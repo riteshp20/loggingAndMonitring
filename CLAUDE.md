@@ -534,3 +534,212 @@ exists.
 |---|---|---|
 | 9200 | TCP | OpenSearch REST API + document storage |
 | 5601 | TCP | OpenSearch Dashboards |
+
+---
+
+# Phase 4 — Alert Routing
+
+Receives `IncidentReport` objects from the Phase 3 pipeline and routes them to
+the correct notification channels based on severity, enforcing per-service rate
+limits and batching excess alerts into a digest.
+
+## Commands
+
+```bash
+# Run the full test suite (597 tests, no external services required)
+cd incident-reporter
+python -m pytest tests/ -v
+
+# Run only Phase 4 tests
+python -m pytest tests/test_routing.py tests/test_slack.py \
+  tests/test_pagerduty.py tests/test_rate_limiter.py \
+  tests/test_digest.py tests/test_dispatcher.py -v
+
+# Start the incident reporter with alert routing enabled
+SLACK_BOT_TOKEN=xoxb-... \
+PAGERDUTY_ROUTING_KEY=... \
+DASHBOARD_BASE_URL=http://localhost:5601 \
+docker compose up -d --build incident-reporter
+```
+
+## Architecture
+
+```
+IncidentReport (from Phase 3 pipeline)
+          │
+          ▼
+  ┌───────────────────────────────────────────────────────┐
+  │                  AlertDispatcher                      │
+  │                                                       │
+  │  ┌──────────────────────────────────────────────────┐ │
+  │  │  Part 1 — AlertRouter                            │ │
+  │  │  P1 → PagerDuty + #incidents + email             │ │
+  │  │  P2 → #alerts + email                            │ │
+  │  │  P3 → #monitoring only                           │ │
+  │  │  + service oncall channel appended always        │ │
+  │  └─────────────────────┬────────────────────────────┘ │
+  │                        │ RoutingDecision               │
+  │  ┌─────────────────────▼────────────────────────────┐ │
+  │  │  RateLimiter (sliding window, 10 alerts/hr/svc)  │ │
+  │  └──────────┬───────────────────────┬───────────────┘ │
+  │          allowed               rate-limited            │
+  │             │                       │                  │
+  │  ┌──────────▼──────────┐  ┌────────▼──────────────┐  │
+  │  │  Part 2 — Slack     │  │  DigestBuffer          │  │
+  │  │  Block Kit alert    │  │  accumulates excess    │  │
+  │  │  + threaded report  │  │  → send_digest() posts │  │
+  │  └─────────────────────┘  │    summary to Slack    │  │
+  │  ┌──────────────────────┐ └────────────────────────┘  │
+  │  │  Part 3 — PagerDuty  │                             │
+  │  │  trigger / resolve   │                             │
+  │  │  dedup_key = svc +   │                             │
+  │  │  anomaly_type        │                             │
+  │  └──────────────────────┘                             │
+  └───────────────────────────────────────────────────────┘
+```
+
+## Four-part implementation
+
+### Part 1 — Severity routing (`alert_router/router.py`)
+
+`AlertRouter.route(report)` produces a `RoutingDecision` from the report's severity:
+
+| Severity | PagerDuty | Slack channels | Email |
+|---|---|---|---|
+| P1 | ✅ trigger | `#incidents` + service oncall channel | ✅ |
+| P2 | ✗ | `#alerts` + service oncall channel | ✅ |
+| P3 | ✗ | `#monitoring` + service oncall channel | ✗ |
+
+Unknown severities fall back to P3 rules.  The service-specific on-call channel
+from `oncall_owner.slack_channel` is always appended (deduplicated) so the owning
+team is always notified.
+
+### Part 2 — Slack Block Kit (`alert_router/slack/`)
+
+`SlackMessageBuilder` assembles two payloads per alert:
+
+**Main alert message** (posted to the channel):
+```
+[Header]  [P1] payment-svc — Error Rate Spike (+627%)
+[Metrics] error_rate: 0.011 → 0.080 *(+627%)*
+[Summary] 🤖 AI Summary — DB pool exhausted…
+[Errors]  🔴 Top Errors — 1. `DB timeout` ×3  2. `Connection refused`
+[Actions] ✅ Acknowledge | 📊 View Dashboard | 🔕 Silence 1hr
+[Context] Confidence: 88% | Z-score: 6.2 | AI: ✅ | Report: `abc123…`
+```
+
+**Thread reply** (posted as a thread on the main message):
+Full incident report — summary, probable cause, evidence, suggested actions,
+user impact, on-call routing, and report metadata.
+
+**Digest message** (posted to `#monitoring` when rate-limited alerts are flushed):
+Header with suppressed count, list of batched anomalies with severity/z-score/
+timestamp, and a context block with the highest z-score and average confidence.
+
+`SlackNotifier.send_alert(channel, report)` posts both messages and returns the
+thread timestamp.  `send_message(channel, payload)` posts a raw payload (used
+for digest delivery).
+
+### Part 3 — PagerDuty (`alert_router/pagerduty/`)
+
+Uses the **Events API v2** (`https://events.pagerduty.com/v2/enqueue`).
+
+| Operation | When | Payload |
+|---|---|---|
+| `trigger` | `z_score ≥ 1.5` | summary, severity, source, timestamp, custom_details, runbook link |
+| `resolve` | `z_score < 1.5` | routing_key + dedup_key only |
+
+**`dedup_key = "{service}_{anomaly_type}"`** — ties every trigger/resolve for the same
+fault together so PagerDuty deduplicates re-alerts automatically.
+
+**Runbook URL** is read from `oncall_owner["runbook_url"]` (populated by the
+service registry) and included as a link in the trigger payload.  If absent,
+`links` is omitted.
+
+**Severity mapping**: P1 → `critical`, P2 → `error`, P3 → `warning`.
+
+HTTP calls are abstracted behind an injectable `_post_fn` callable — no extra
+dependency; the real implementation uses stdlib `urllib`.
+
+### Part 4 — Rate limiting + digest (`alert_router/rate_limiter.py`, `alert_router/digest.py`)
+
+**`RateLimiter`** — sliding-window counter (injectable clock for tests):
+- Tracks a list of alert timestamps per service
+- Each `check_and_record(service)` prunes timestamps older than 1 hour
+- Returns `(True, False)` when count < 10 (allowed)
+- Returns `(False, True)` when count ≥ 10 (rate-limited → queue to digest)
+- `reset(service)` / `reset_all()` for operator overrides
+
+**`DigestBuffer`** — thread-safe per-service accumulator:
+- `add(report)` → appends to buffer, returns new count
+- `flush(service)` → returns and clears buffer for one service
+- `flush_all()` → returns and clears all services
+- `services_with_pending()` → list of services with queued reports
+
+**`AlertDispatcher`** — wires all four parts:
+```
+dispatch(report):
+  1. router.route(report)              → RoutingDecision
+  2. rate_limiter.check_and_record()   → allowed | rate_limited
+  3a. rate_limited → digest.add(report); return early
+  3b. allowed     → pd_client.notify() + slack.send_alert() per target
+  4. return DispatchResult
+
+send_digest(service, channel="#monitoring"):
+  1. digest.flush(service)
+  2. slack.send_message(channel, digest_payload)
+```
+
+## `RoutingDecision` fields
+
+| Field | Type | Description |
+|---|---|---|
+| `report_id` | str | Links to the IncidentReport |
+| `service` | str | Service being alerted |
+| `severity` | str | P1 / P2 / P3 |
+| `channels` | list[Channel] | Channels to notify (pagerduty / slack / email) |
+| `slack_targets` | list[str] | Slack channel names to post to |
+| `email_recipients` | list[str] | On-call email addresses |
+| `send_pagerduty` | bool | Whether to call PagerDuty |
+| `send_email` | bool | Whether to send email |
+| `rate_limited` | bool | Set True when suppressed by rate limiter |
+| `digest_queued` | bool | Set True when added to digest buffer |
+
+## Key files
+
+| File | Purpose |
+|---|---|
+| `incident-reporter/alert_router/router.py` | `AlertRouter` — severity → `RoutingDecision` |
+| `incident-reporter/alert_router/rules.py` | Severity routing rules constant table |
+| `incident-reporter/alert_router/models.py` | `Channel` enum, `RoutingDecision` dataclass |
+| `incident-reporter/alert_router/rate_limiter.py` | `RateLimiter` — sliding-window, thread-safe |
+| `incident-reporter/alert_router/digest.py` | `DigestBuffer` — per-service accumulator |
+| `incident-reporter/alert_router/dispatcher.py` | `AlertDispatcher` + `DispatchResult` — full wiring |
+| `incident-reporter/alert_router/slack/blocks.py` | `SlackMessageBuilder` — alert + thread + digest payloads |
+| `incident-reporter/alert_router/slack/notifier.py` | `SlackNotifier` — posts via Slack Web API |
+| `incident-reporter/alert_router/pagerduty/client.py` | `PagerDutyClient` — trigger / resolve / notify |
+| `incident-reporter/alert_router/pagerduty/models.py` | `PagerDutyAction`, `PagerDutySeverity` enums |
+| `incident-reporter/service_registry.json` | Added `runbook_url` to all 8 services + default |
+| `incident-reporter/tests/test_routing.py` | 64 routing tests |
+| `incident-reporter/tests/test_slack.py` | 103 Slack Block Kit tests |
+| `incident-reporter/tests/test_pagerduty.py` | 84 PagerDuty tests |
+| `incident-reporter/tests/test_rate_limiter.py` | 42 rate limiter tests |
+| `incident-reporter/tests/test_digest.py` | 38 digest tests |
+| `incident-reporter/tests/test_dispatcher.py` | 46 dispatcher tests |
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SLACK_BOT_TOKEN` | _(empty — Slack disabled)_ | Slack Bot OAuth token for posting alerts |
+| `PAGERDUTY_ROUTING_KEY` | _(empty — PD disabled)_ | PagerDuty Events API v2 routing key |
+| `DASHBOARD_BASE_URL` | `http://localhost:5601` | Base URL for "View Dashboard" buttons in Slack |
+
+## Rate limiting behaviour
+
+```
+First 10 alerts for a service within any rolling 60-minute window → dispatched normally
+Alert 11+ within the same window                                   → suppressed, added to DigestBuffer
+After the window slides (oldest alert > 1 hr ago)                 → count decreases, new alerts allowed again
+send_digest(service) called by operator/scheduler                  → flushes buffer, posts summary to #monitoring
+```

@@ -166,7 +166,7 @@ class TestIncidentReportModel:
             "probable_cause", "evidence", "suggested_actions",
             "estimated_user_impact", "confidence_score", "ai_generated",
             "oncall_owner", "z_score", "observed_metrics", "baseline_metrics",
-            "pii_scrub_count",
+            "pii_scrub_count", "top_log_samples",
         }
         assert required == set(d.keys())
 
