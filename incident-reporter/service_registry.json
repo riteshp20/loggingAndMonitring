@@ -5,7 +5,8 @@
     "slack_channel": "#payments-oncall",
     "pagerduty_service_id": "PD11111",
     "escalation_policy": "payments-escalation",
-    "tier": "P1"
+    "tier": "P1",
+    "runbook_url": "https://wiki.company.com/runbooks/payment-svc"
   },
   "auth-svc": {
     "team": "identity",
@@ -13,7 +14,8 @@
     "slack_channel": "#identity-oncall",
     "pagerduty_service_id": "PD22222",
     "escalation_policy": "identity-escalation",
-    "tier": "P1"
+    "tier": "P1",
+    "runbook_url": "https://wiki.company.com/runbooks/auth-svc"
   },
   "order-svc": {
     "team": "commerce",
@@ -21,7 +23,8 @@
     "slack_channel": "#commerce-oncall",
     "pagerduty_service_id": "PD33333",
     "escalation_policy": "commerce-escalation",
-    "tier": "P1"
+    "tier": "P1",
+    "runbook_url": "https://wiki.company.com/runbooks/order-svc"
   },
   "inventory-svc": {
     "team": "commerce",
@@ -29,7 +32,8 @@
     "slack_channel": "#commerce-oncall",
     "pagerduty_service_id": "PD33334",
     "escalation_policy": "commerce-escalation",
-    "tier": "P2"
+    "tier": "P2",
+    "runbook_url": "https://wiki.company.com/runbooks/inventory-svc"
   },
   "notification-svc": {
     "team": "platform",
@@ -37,7 +41,8 @@
     "slack_channel": "#platform-oncall",
     "pagerduty_service_id": "PD44444",
     "escalation_policy": "platform-escalation",
-    "tier": "P2"
+    "tier": "P2",
+    "runbook_url": "https://wiki.company.com/runbooks/notification-svc"
   },
   "api-gateway": {
     "team": "platform",
@@ -45,7 +50,8 @@
     "slack_channel": "#platform-oncall",
     "pagerduty_service_id": "PD44445",
     "escalation_policy": "platform-escalation",
-    "tier": "P1"
+    "tier": "P1",
+    "runbook_url": "https://wiki.company.com/runbooks/api-gateway"
   },
   "recommendation-svc": {
     "team": "personalization",
@@ -53,7 +59,8 @@
     "slack_channel": "#personalization-oncall",
     "pagerduty_service_id": "PD55555",
     "escalation_policy": "personalization-escalation",
-    "tier": "P3"
+    "tier": "P3",
+    "runbook_url": "https://wiki.company.com/runbooks/recommendation-svc"
   },
   "search-svc": {
     "team": "discovery",
@@ -61,7 +68,8 @@
     "slack_channel": "#discovery-oncall",
     "pagerduty_service_id": "PD66666",
     "escalation_policy": "discovery-escalation",
-    "tier": "P2"
+    "tier": "P2",
+    "runbook_url": "https://wiki.company.com/runbooks/search-svc"
   },
   "default": {
     "team": "platform",
@@ -69,6 +77,7 @@
     "slack_channel": "#platform-oncall",
     "pagerduty_service_id": null,
     "escalation_policy": "default-escalation",
-    "tier": "P3"
+    "tier": "P3",
+    "runbook_url": "https://wiki.company.com/runbooks/general"
   }
 }

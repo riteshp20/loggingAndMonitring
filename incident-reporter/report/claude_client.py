@@ -141,6 +141,7 @@ class ClaudeReportGenerator:
             observed_metrics=event.observed,
             baseline_metrics=event.baseline,
             pii_scrub_count=event.pii_scrub_count,
+            top_log_samples=list(event.top_log_samples),
         )
 
     def _fallback_report(self, event: EnrichedAnomalyEvent) -> IncidentReport:
@@ -184,6 +185,7 @@ class ClaudeReportGenerator:
             observed_metrics=event.observed,
             baseline_metrics=event.baseline,
             pii_scrub_count=event.pii_scrub_count,
+            top_log_samples=list(event.top_log_samples),
         )
 
 

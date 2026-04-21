@@ -29,6 +29,12 @@ from pii.scrubber import PiiScrubber
 from pipeline import IncidentReportPipeline
 from report.claude_client import ClaudeReportGenerator
 from storage.report_store import ReportStore
+from alert_router.dispatcher import AlertDispatcher
+from alert_router.digest import DigestBuffer
+from alert_router.pagerduty.client import PagerDutyClient
+from alert_router.rate_limiter import RateLimiter
+from alert_router.router import AlertRouter
+from alert_router.slack.notifier import SlackNotifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +53,9 @@ def main() -> None:
     opensearch_pass = os.getenv("OPENSEARCH_PASSWORD", "")
     registry_path = os.getenv("SERVICE_REGISTRY_PATH", "service_registry.json")
     anthropic_api_key = os.getenv("ANTHROPIC_API_KEY") or None
+    slack_token = os.getenv("SLACK_BOT_TOKEN") or None
+    pd_routing_key = os.getenv("PAGERDUTY_ROUTING_KEY") or None
+    dashboard_url = os.getenv("DASHBOARD_BASE_URL", "http://localhost:5601")
 
     # ── wire components ───────────────────────────────────────────────────
     os_client = OpenSearchClient(
@@ -63,6 +72,27 @@ def main() -> None:
     )
     store = ReportStore(os_client)
     pipeline = IncidentReportPipeline(enricher=enricher, generator=generator, store=store)
+
+    # ── alert dispatcher ──────────────────────────────────────────────────
+    slack_notifier = (
+        SlackNotifier(token=slack_token, dashboard_base_url=dashboard_url)
+        if slack_token else None
+    )
+    pd_client = (
+        PagerDutyClient(routing_key=pd_routing_key)
+        if pd_routing_key else None
+    )
+    dispatcher = AlertDispatcher(
+        router=AlertRouter(),
+        rate_limiter=RateLimiter(),
+        digest=DigestBuffer(),
+        slack_notifier=slack_notifier,
+        pd_client=pd_client,
+    )
+    if slack_notifier is None:
+        logger.warning("SLACK_BOT_TOKEN not set — Slack alerts disabled")
+    if pd_client is None:
+        logger.warning("PAGERDUTY_ROUTING_KEY not set — PagerDuty alerts disabled")
 
     # ── ensure index exists ───────────────────────────────────────────────
     store.ensure_index()
@@ -100,7 +130,9 @@ def main() -> None:
                     if not running:
                         break
                     try:
-                        pipeline.process(msg.value)
+                        report = pipeline.process(msg.value)
+                        if report is not None:
+                            dispatcher.dispatch(report)
                     except Exception as exc:
                         logger.error(
                             "Unhandled error at offset=%d partition=%d: %s",

@@ -34,6 +34,7 @@ class IncidentReport:
     observed_metrics: dict
     baseline_metrics: dict
     pii_scrub_count: int = 0  # populated by Part 3 (PII scrubber)
+    top_log_samples: list = field(default_factory=list)  # raw log lines from the anomaly window
 
     def to_dict(self) -> dict:
         return asdict(self)
