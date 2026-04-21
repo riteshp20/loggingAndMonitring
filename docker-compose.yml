@@ -397,6 +397,36 @@ services:
     networks:
       - monitoring
 
+  # ── Dashboard API ─────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: log-agent/api:latest
+    container_name: log-monitor-api
+    ports:
+      - "8000:8000"
+    environment:
+      OPENSEARCH_URL:        http://opensearch:9200
+      OPENSEARCH_USERNAME:   ${OPENSEARCH_USERNAME:-}
+      OPENSEARCH_PASSWORD:   ${OPENSEARCH_PASSWORD:-}
+      REDIS_URL:             redis://redis:6379
+      SERVICE_REGISTRY_PATH: /app/service_registry.json
+      JWT_SECRET:                ${JWT_SECRET:-change-me-in-production}
+      RATE_LIMIT_REQUESTS:       ${RATE_LIMIT_REQUESTS:-100}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      KAFKA_BROKERS:             kafka-1:9092,kafka-2:9092,kafka-3:9092
+      KAFKA_ANOMALY_TOPIC:       anomaly-events
+      KAFKA_CONSUMER_GROUP_SSE:  api-sse
+    volumes:
+      - ./incident-reporter/service_registry.json:/app/service_registry.json:ro
+    depends_on:
+      - redis
+      - opensearch
+    restart: unless-stopped
+    networks:
+      - monitoring
+
 # ── Volumes ────────────────────────────────────────────────────────────────────
 volumes:
   kafka_1_data:     { driver: local }
