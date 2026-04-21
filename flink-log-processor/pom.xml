@@ -28,7 +28,7 @@
 
         <!-- OpenSearch — we use the low-level REST client directly (no HLRC)
              to avoid transitive dependency conflicts with Flink's httpclient. -->
-        <opensearch.client.version>2.12.0</opensearch.client.version>
+        <opensearch.client.version>3.6.0</opensearch.client.version>
 
         <!-- Logging -->
         <log4j.version>2.22.1</log4j.version>
