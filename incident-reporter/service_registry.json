@@ -1,0 +1,74 @@
+{
+  "payment-svc": {
+    "team": "payments",
+    "oncall": "payments-oncall@company.com",
+    "slack_channel": "#payments-oncall",
+    "pagerduty_service_id": "PD11111",
+    "escalation_policy": "payments-escalation",
+    "tier": "P1"
+  },
+  "auth-svc": {
+    "team": "identity",
+    "oncall": "identity-oncall@company.com",
+    "slack_channel": "#identity-oncall",
+    "pagerduty_service_id": "PD22222",
+    "escalation_policy": "identity-escalation",
+    "tier": "P1"
+  },
+  "order-svc": {
+    "team": "commerce",
+    "oncall": "commerce-oncall@company.com",
+    "slack_channel": "#commerce-oncall",
+    "pagerduty_service_id": "PD33333",
+    "escalation_policy": "commerce-escalation",
+    "tier": "P1"
+  },
+  "inventory-svc": {
+    "team": "commerce",
+    "oncall": "commerce-oncall@company.com",
+    "slack_channel": "#commerce-oncall",
+    "pagerduty_service_id": "PD33334",
+    "escalation_policy": "commerce-escalation",
+    "tier": "P2"
+  },
+  "notification-svc": {
+    "team": "platform",
+    "oncall": "platform-oncall@company.com",
+    "slack_channel": "#platform-oncall",
+    "pagerduty_service_id": "PD44444",
+    "escalation_policy": "platform-escalation",
+    "tier": "P2"
+  },
+  "api-gateway": {
+    "team": "platform",
+    "oncall": "platform-oncall@company.com",
+    "slack_channel": "#platform-oncall",
+    "pagerduty_service_id": "PD44445",
+    "escalation_policy": "platform-escalation",
+    "tier": "P1"
+  },
+  "recommendation-svc": {
+    "team": "personalization",
+    "oncall": "personalization-oncall@company.com",
+    "slack_channel": "#personalization-oncall",
+    "pagerduty_service_id": "PD55555",
+    "escalation_policy": "personalization-escalation",
+    "tier": "P3"
+  },
+  "search-svc": {
+    "team": "discovery",
+    "oncall": "discovery-oncall@company.com",
+    "slack_channel": "#discovery-oncall",
+    "pagerduty_service_id": "PD66666",
+    "escalation_policy": "discovery-escalation",
+    "tier": "P2"
+  },
+  "default": {
+    "team": "platform",
+    "oncall": "oncall@company.com",
+    "slack_channel": "#platform-oncall",
+    "pagerduty_service_id": null,
+    "escalation_policy": "default-escalation",
+    "tier": "P3"
+  }
+}
