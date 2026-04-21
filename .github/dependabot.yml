@@ -1,0 +1,81 @@
+version: 2
+updates:
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, ci]
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Python — anomaly-detector
+  - package-ecosystem: pip
+    directory: /anomaly-detector
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, python]
+    ignore:
+      # Pin pytest — major versions often break test collection
+      - dependency-name: pytest
+        update-types: [version-update:semver-major]
+
+  # Python — incident-reporter
+  - package-ecosystem: pip
+    directory: /incident-reporter
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, python]
+
+  # Python — api
+  - package-ecosystem: pip
+    directory: /api
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, python]
+
+  # Maven — flink-log-processor
+  - package-ecosystem: maven
+    directory: /flink-log-processor
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, java]
+    ignore:
+      # Flink connector versions must match the cluster — only allow patch updates
+      - dependency-name: "org.apache.flink:*"
+        update-types: [version-update:semver-major, version-update:semver-minor]
+
+  # Terraform
+  - package-ecosystem: terraform
+    directory: /terraform
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, terraform]
+
+  # Docker base images
+  - package-ecosystem: docker
+    directory: /anomaly-detector
+    schedule: { interval: weekly }
+    labels: [dependencies, docker]
+
+  - package-ecosystem: docker
+    directory: /incident-reporter
+    schedule: { interval: weekly }
+    labels: [dependencies, docker]
+
+  - package-ecosystem: docker
+    directory: /api
+    schedule: { interval: weekly }
+    labels: [dependencies, docker]
+
+  - package-ecosystem: docker
+    directory: /flink-log-processor
+    schedule: { interval: weekly }
+    labels: [dependencies, docker]

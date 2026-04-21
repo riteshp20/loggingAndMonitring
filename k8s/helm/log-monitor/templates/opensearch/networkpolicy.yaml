@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opensearch-netpol
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "opensearch" "root" .) | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - port: 9200
+        - port: 9300
+      from:
+        # inter-node transport
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: opensearch
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: flink-taskmanager
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: incident-reporter
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+  egress:
+    # inter-node
+    - ports:
+        - port: 9300
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: opensearch
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

@@ -1,0 +1,62 @@
+# Kafka brokers accept connections only from:
+#   - other Kafka brokers (controller replication)
+#   - Fluent Bit (producer)
+#   - Flink job (producer + consumer)
+#   - Anomaly Detector (consumer)
+#   - Incident Reporter (consumer)
+#   - Dashboard API (SSE consumer)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kafka-netpol
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "kafka" "root" .) | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - port: 9092
+        - port: 9093
+      from:
+        # inter-broker
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kafka
+        # producers / consumers
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: fluent-bit
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: flink-taskmanager
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: flink-jobmanager
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: anomaly-detector
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: incident-reporter
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+  egress:
+    # inter-broker replication
+    - ports:
+        - port: 9092
+        - port: 9093
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kafka
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/name: kafka
+spec:
+  serviceName: kafka-headless
+  replicas: {{ .Values.kafka.replicas }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "kafka" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "log-monitor.podLabels" (dict "component" "kafka" "root" .) | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/kafka/configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        fsGroup: 1001
+        runAsUser: 1001
+        runAsNonRoot: true
+      terminationGracePeriodSeconds: 60
+      affinity:
+        podAntiAffinity:
+          # Hard anti-affinity: never schedule two brokers on the same node
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "log-monitor.selectorLabels" (dict "component" "kafka" "root" .) | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: kafka
+          image: {{ .Values.kafka.image }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          ports:
+            - name: plaintext
+              containerPort: 9092
+            - name: controller
+              containerPort: 9093
+          envFrom:
+            - configMapRef:
+                name: kafka-config
+          env:
+            # Pod-specific values injected via the downward API
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KAFKA_CFG_NODE_ID
+              # kafka-0 → node 1, kafka-1 → node 2, kafka-2 → node 3
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+            - name: KAFKA_CFG_LISTENERS
+              value: "PLAINTEXT://:9092,CONTROLLER://:9093"
+            - name: KAFKA_CFG_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://$(MY_POD_NAME).kafka-headless.{{ include "log-monitor.namespace" . }}.svc.cluster.local:9092"
+          livenessProbe:
+            exec:
+              command:
+                - kafka-broker-api-versions.sh
+                - --bootstrap-server
+                - localhost:9092
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - kafka-broker-api-versions.sh
+                - --bootstrap-server
+                - localhost:9092
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            timeoutSeconds: 15
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.kafka.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /bitnami/kafka
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.kafka.storage.storageClass }}
+        storageClassName: {{ .Values.kafka.storage.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.kafka.storage.size }}

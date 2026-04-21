@@ -1,0 +1,9 @@
+variable "name"                   { type = string }
+variable "account_id"             { type = string }
+variable "oidc_provider_arn"      { type = string }
+variable "oidc_provider_url"      { type = string }
+variable "flink_checkpoint_bucket" { type = string }
+variable "log_archive_bucket"     { type = string }
+variable "msk_cluster_arn"        { type = string }
+variable "opensearch_domain_arn"  { type = string }
+variable "kms_key_arns"           { type = list(string) }

@@ -1,0 +1,190 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# log-monitor Helm values
+#
+# Override per environment:
+#   helm upgrade --install log-monitor ./log-monitor \
+#     -f values-prod.yaml \
+#     --set secrets.anthropicApiKey=$ANTHROPIC_API_KEY \
+#     --set secrets.jwtSecret=$JWT_SECRET
+# ═══════════════════════════════════════════════════════════════════════════════
+
+global:
+  namespace: log-monitor
+  image:
+    pullPolicy: IfNotPresent
+  # Label applied to every resource — used by NetworkPolicy selectors
+  partOf: log-monitor
+
+# ── Kafka ──────────────────────────────────────────────────────────────────────
+kafka:
+  replicas: 3
+  image: bitnami/kafka:3.7
+  # KRaft cluster ID — generate once: kafka-storage.sh random-uuid
+  kraftClusterId: "MkU3OEVBNTcwNTJENDM2Qk"
+  storage:
+    size: 50Gi
+    storageClass: ""       # leave empty to use cluster default
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  pdb:
+    minAvailable: 2        # tolerate 1 broker down during rolling upgrades
+  config:
+    defaultReplicationFactor: "3"
+    minInsyncReplicas: "2"
+    numPartitions: "12"
+    logRetentionHours: "168"
+    messageMaxBytes: "1048576"
+    autoCreateTopicsEnable: "false"
+    uncleanLeaderElectionEnable: "false"
+
+# ── OpenSearch ─────────────────────────────────────────────────────────────────
+opensearch:
+  replicas: 3
+  image: opensearchproject/opensearch:2.13.0
+  javaOpts: "-Xms2g -Xmx2g"
+  storage:
+    size: 100Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  pdb:
+    minAvailable: 2
+  # Set to true to disable the security plugin (local dev only)
+  disableSecurity: false
+
+# ── Redis ──────────────────────────────────────────────────────────────────────
+redis:
+  replicas: 1
+  image: redis:7.2-alpine
+  maxmemory: 512mb
+  storage:
+    size: 5Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# ── Flink ──────────────────────────────────────────────────────────────────────
+flink:
+  image: log-agent/flink-log-processor:latest
+  checkpointStorage:
+    size: 20Gi
+    storageClass: ""
+  jobmanager:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+  taskmanager:
+    replicas: 2
+    taskSlots: 4
+    resources:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+  job:
+    inputTopic: raw-logs
+    outputTopic: processed-logs
+    consumerGroup: flink-log-processor
+    checkpointIntervalMs: 60000
+    parallelism: 4
+
+# ── Fluent Bit ─────────────────────────────────────────────────────────────────
+fluentBit:
+  image: log-agent/fluent-bit:latest
+  logLevel: info
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# ── Anomaly Detector ───────────────────────────────────────────────────────────
+anomalyDetector:
+  image: log-agent/anomaly-detector:latest
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  hpa:
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+# ── Incident Reporter ──────────────────────────────────────────────────────────
+incidentReporter:
+  image: log-agent/incident-reporter:latest
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  dashboardBaseUrl: "https://dashboards.example.com"
+
+# ── Dashboard API ──────────────────────────────────────────────────────────────
+api:
+  image: log-agent/api:latest
+  replicas: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  hpa:
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 60
+  service:
+    type: ClusterIP
+    port: 8000
+  ingress:
+    enabled: true
+    className: nginx
+    host: api.log-monitor.example.com
+    tls: true
+    tlsSecretName: log-monitor-api-tls
+  rateLimitRequests: 100
+  rateLimitWindowSeconds: 60
+
+# ── Secrets (injected via --set or external-secrets in production) ─────────────
+# Never commit real values here.
+# In production use Vault / AWS Secrets Manager / sealed-secrets.
+secrets:
+  anthropicApiKey: ""       # REQUIRED
+  jwtSecret: ""             # REQUIRED — min 32 chars
+  opensearchUsername: ""    # optional — leave empty if security plugin disabled
+  opensearchPassword: ""    # optional
+  slackBotToken: ""         # optional
+  pagerdutyRoutingKey: ""   # optional

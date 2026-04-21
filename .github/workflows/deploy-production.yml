@@ -1,0 +1,293 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production deployment pipeline
+#
+# Triggered on semver tags (v1.2.3).
+# Workflow:
+#   validate-tag → retag-images → manual-approval → deploy-prod → notify
+#
+# The "production" GitHub Environment must have a required reviewer configured.
+# The pipeline pauses at deploy-prod until an approver clicks "Review deployments".
+# ─────────────────────────────────────────────────────────────────────────────
+name: Deploy — production
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"         # v1.2.3
+      - "v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+" # v1.2.3-rc1
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  packages: read
+
+env:
+  AWS_REGION:     us-east-1
+  ECR_REGISTRY:   ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  EKS_CLUSTER:    log-monitor-prod
+  HELM_RELEASE:   log-monitor
+  HELM_NAMESPACE: log-monitor
+  HELM_CHART:     k8s/helm/log-monitor
+  SERVICES: >-
+    anomaly-detector
+    incident-reporter
+    api
+    flink-log-processor
+    fluent-bit
+
+jobs:
+
+  # ── 1. Validate the tag and resolve the staging SHA ───────────────────────
+  validate-tag:
+    name: Validate tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version:   ${{ steps.parse.outputs.version }}
+      short_sha: ${{ steps.parse.outputs.short_sha }}
+      is_rc:     ${{ steps.parse.outputs.is_rc }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse tag metadata
+        id: parse
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          IS_RC=$(echo "$TAG" | grep -q '\-rc' && echo 'true' || echo 'false')
+
+          echo "version=$VERSION"    >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "is_rc=$IS_RC"        >> "$GITHUB_OUTPUT"
+
+          echo "### Tag info" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Key | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | \`$VERSION\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SHA | \`$SHORT_SHA\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| RC | $IS_RC |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify staging images exist in ECR
+        run: |
+          for svc in ${{ env.SERVICES }}; do
+            echo "Checking log-monitor/${svc}:sha-${{ steps.parse.outputs.short_sha }}..."
+            aws ecr describe-images \
+              --repository-name "log-monitor/${svc}" \
+              --image-ids imageTag="sha-${{ steps.parse.outputs.short_sha }}" \
+              --region ${{ env.AWS_REGION }} > /dev/null \
+            || { echo "❌ Image not found for ${svc}"; exit 1; }
+            echo "  ✅ Found"
+          done
+        env:
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+
+  # ── 2. Retag staging images with the semver version ───────────────────────
+  retag-images:
+    name: Retag images
+    runs-on: ubuntu-24.04
+    needs: validate-tag
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Retag: copy the exact SHA image that ran through staging to the version tag.
+      # This guarantees prod runs the identical binary that was tested — no rebuild.
+      - name: Retag all service images
+        run: |
+          SHORT_SHA="${{ needs.validate-tag.outputs.short_sha }}"
+          VERSION="${{ needs.validate-tag.outputs.version }}"
+
+          for svc in ${{ env.SERVICES }}; do
+            REPO="${{ env.ECR_REGISTRY }}/log-monitor/${svc}"
+            echo "Retagging ${svc}  sha-${SHORT_SHA} → ${VERSION} + latest"
+
+            # Pull the manifest digest and re-push under the version tag (no re-download)
+            MANIFEST=$(aws ecr batch-get-image \
+              --repository-name "log-monitor/${svc}" \
+              --image-ids imageTag="sha-${SHORT_SHA}" \
+              --query 'images[0].imageManifest' \
+              --output text)
+
+            aws ecr put-image \
+              --repository-name "log-monitor/${svc}" \
+              --image-tag "${VERSION}" \
+              --image-manifest "$MANIFEST"
+
+            aws ecr put-image \
+              --repository-name "log-monitor/${svc}" \
+              --image-tag "latest" \
+              --image-manifest "$MANIFEST"
+
+            echo "  ✅ ${svc}:${VERSION}"
+          done
+
+  # ── 3. Manual approval gate ───────────────────────────────────────────────
+  # Pause here until a required reviewer approves in the "production" Environment.
+  # Configure required reviewers at:
+  #   Settings → Environments → production → Required reviewers
+  deploy-production:
+    name: Deploy to production
+    runs-on: ubuntu-24.04
+    needs: [validate-tag, retag-images]
+    environment:
+      name: production
+      url: https://api.log-monitor.example.com/docs
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ env.EKS_CLUSTER }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.2
+
+      - name: Capture pre-deploy state
+        id: pre_deploy
+        run: |
+          echo "helm_revision=$(helm history ${{ env.HELM_RELEASE }} \
+            -n ${{ env.HELM_NAMESPACE }} --max 1 -o json \
+            | jq -r '.[0].revision // "0"')" >> "$GITHUB_OUTPUT"
+
+      - name: Helm upgrade — production
+        run: |
+          VERSION="${{ needs.validate-tag.outputs.version }}"
+
+          helm upgrade --install ${{ env.HELM_RELEASE }} ${{ env.HELM_CHART }} \
+            --namespace ${{ env.HELM_NAMESPACE }} \
+            --create-namespace \
+            --atomic \
+            --timeout 15m \
+            --history-max 10 \
+            --description "Release $VERSION — ${{ github.sha }}" \
+            -f ${{ env.HELM_CHART }}/values.yaml \
+            -f ${{ env.HELM_CHART }}/values-prod.yaml \
+            --set global.image.tag="${VERSION}" \
+            --set global.image.registry=${{ env.ECR_REGISTRY }} \
+            --set secrets.anthropicApiKey="${{ secrets.ANTHROPIC_API_KEY }}" \
+            --set secrets.jwtSecret="${{ secrets.JWT_SECRET_PROD }}" \
+            --set secrets.slackBotToken="${{ secrets.SLACK_BOT_TOKEN }}" \
+            --set secrets.pagerdutyRoutingKey="${{ secrets.PAGERDUTY_ROUTING_KEY_PROD }}"
+
+      - name: Smoke tests — production
+        run: |
+          echo "Waiting for rollout..."
+          for deployment in api anomaly-detector incident-reporter; do
+            kubectl rollout status deployment/${deployment} \
+              -n ${{ env.HELM_NAMESPACE }} --timeout=300s
+          done
+
+          BASE_URL="https://api.log-monitor.example.com"
+          for i in $(seq 1 12); do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+              "${BASE_URL}/api/health" || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Production health check passed"
+              exit 0
+            fi
+            echo "Attempt $i: status=$STATUS, retrying in 15s..."
+            sleep 15
+          done
+          echo "❌ Production health check failed"
+          exit 1
+
+      - name: Automatic rollback on failure
+        if: failure()
+        run: |
+          PRE_REV="${{ steps.pre_deploy.outputs.helm_revision }}"
+          if [ -n "$PRE_REV" ] && [ "$PRE_REV" != "0" ]; then
+            echo "Rolling back to revision $PRE_REV..."
+            helm rollback ${{ env.HELM_RELEASE }} "$PRE_REV" \
+              --namespace ${{ env.HELM_NAMESPACE }} \
+              --wait --timeout 10m
+            echo "✅ Rollback complete"
+          else
+            echo "No previous revision to roll back to"
+          fi
+
+  # ── 4. Post-deploy notifications ─────────────────────────────────────────
+  notify:
+    name: Notify
+    runs-on: ubuntu-24.04
+    needs: [validate-tag, deploy-production]
+    if: always()
+
+    steps:
+      - name: Success notification
+        if: needs.deploy-production.result == 'success'
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "✅ *Production deploy succeeded*",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  {"title": "Version", "value": "v${{ needs.validate-tag.outputs.version }}", "short": true},
+                  {"title": "SHA",     "value": "${{ needs.validate-tag.outputs.short_sha }}", "short": true},
+                  {"title": "Actor",   "value": "${{ github.actor }}", "short": true},
+                  {"title": "Run",
+                   "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View>",
+                   "short": true}
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DEPLOY_WEBHOOK }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Failure notification
+        if: needs.deploy-production.result != 'success'
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "🚨 *Production deploy FAILED* — rollback attempted",
+              "attachments": [{
+                "color": "danger",
+                "fields": [
+                  {"title": "Version", "value": "v${{ needs.validate-tag.outputs.version }}", "short": true},
+                  {"title": "Actor",   "value": "${{ github.actor }}", "short": true},
+                  {"title": "Run",
+                   "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>",
+                   "short": true}
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DEPLOY_WEBHOOK }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Create GitHub release
+        if: needs.deploy-production.result == 'success' && needs.validate-tag.outputs.is_rc == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.validate-tag.outputs.version }}
+          name: v${{ needs.validate-tag.outputs.version }}
+          generate_release_notes: true
+          make_latest: true

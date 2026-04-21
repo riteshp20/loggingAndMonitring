@@ -1,0 +1,31 @@
+# Copy to terraform.tfvars and fill in values before running terraform apply.
+# Never commit terraform.tfvars — add it to .gitignore.
+
+aws_region  = "us-east-1"
+project     = "log-monitor"
+environment = "prod"
+
+availability_zones   = ["us-east-1a", "us-east-1b", "us-east-1c"]
+vpc_cidr             = "10.0.0.0/16"
+private_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+public_subnet_cidrs  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+
+eks_kubernetes_version = "1.30"
+
+msk_kafka_version      = "3.6.0"
+msk_broker_instance_type = "kafka.m5.xlarge"
+msk_broker_storage_gb  = 1000
+msk_broker_count       = 3
+
+opensearch_engine_version = "OpenSearch_2.13"
+opensearch_instance_type  = "m6g.large.search"
+opensearch_instance_count = 3
+opensearch_volume_size_gb = 500
+
+redis_node_type      = "cache.r7g.large"
+redis_engine_version = "7.1"
+redis_num_cache_nodes = 2
+
+log_archive_retention_days      = 30
+log_archive_glacier_days        = 365
+flink_checkpoint_retention_days = 7

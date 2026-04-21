@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-reporter
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/name: incident-reporter
+spec:
+  replicas: {{ .Values.incidentReporter.replicas }}
+  selector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "incident-reporter" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "log-monitor.podLabels" (dict "component" "incident-reporter" "root" .) | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
+        runAsGroup: 1000
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: incident-reporter
+          image: {{ .Values.incidentReporter.image }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          env:
+            - name: KAFKA_BROKERS
+              value: {{ include "log-monitor.kafkaBootstrap" . | quote }}
+            - name: KAFKA_ANOMALY_TOPIC
+              value: anomaly-events
+            - name: KAFKA_CONSUMER_GROUP
+              value: incident-reporter
+            - name: OPENSEARCH_URL
+              value: {{ include "log-monitor.opensearchUrl" . | quote }}
+            - name: OPENSEARCH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: log-monitor-secrets
+                  key: opensearch-username
+                  optional: true
+            - name: OPENSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: log-monitor-secrets
+                  key: opensearch-password
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: log-monitor-secrets
+                  key: anthropic-api-key
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: log-monitor-secrets
+                  key: slack-bot-token
+                  optional: true
+            - name: PAGERDUTY_ROUTING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: log-monitor-secrets
+                  key: pagerduty-routing-key
+                  optional: true
+            - name: DASHBOARD_BASE_URL
+              value: {{ .Values.incidentReporter.dashboardBaseUrl | quote }}
+            - name: REDIS_URL
+              value: {{ include "log-monitor.redisUrl" . | quote }}
+            - name: SERVICE_REGISTRY_PATH
+              value: /app/service_registry.json
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - |
+                  import redis, os
+                  redis.from_url(os.environ['REDIS_URL']).ping()
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - |
+                  import redis, os
+                  redis.from_url(os.environ['REDIS_URL']).ping()
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.incidentReporter.resources | nindent 12 }}

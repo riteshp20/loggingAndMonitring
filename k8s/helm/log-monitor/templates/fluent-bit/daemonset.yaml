@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+---
+# ClusterRole to read pod metadata for log enrichment
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "log-monitor.namespace" . }}-fluent-bit
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "log-monitor.namespace" . }}-fluent-bit
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit
+    namespace: {{ include "log-monitor.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "log-monitor.namespace" . }}-fluent-bit
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/name: fluent-bit
+spec:
+  selector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "fluent-bit" "root" .) | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "log-monitor.podLabels" (dict "component" "fluent-bit" "root" .) | nindent 8 }}
+    spec:
+      serviceAccountName: fluent-bit
+      tolerations:
+        # Run on every node including control-plane
+        - operator: Exists
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: fluent-bit
+          image: {{ .Values.fluentBit.image }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          ports:
+            - name: tcp-input
+              containerPort: 5170
+            - name: udp-input
+              containerPort: 5171
+              protocol: UDP
+            - name: syslog
+              containerPort: 5140
+            - name: http-metrics
+              containerPort: 2020
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: ENVIRONMENT
+              value: {{ .Values.global.partOf | quote }}
+            - name: KAFKA_BROKERS
+              value: {{ include "log-monitor.kafkaBootstrap" . | quote }}
+            - name: FLB_LOG_LEVEL
+              value: {{ .Values.fluentBit.logLevel | quote }}
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.fluentBit.resources | nindent 12 }}
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: fluent-bit-state
+              mountPath: /var/log/fluent-bit
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers
+        - name: fluent-bit-state
+          hostPath:
+            path: /var/log/fluent-bit-state
+            type: DirectoryOrCreate

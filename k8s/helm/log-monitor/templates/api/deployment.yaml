@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/name: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "api" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "log-monitor.podLabels" (dict "component" "api" "root" .) | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
+        runAsGroup: 1000
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: {{ .Values.api.image }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: OPENSEARCH_URL
+              value: {{ include "log-monitor.opensearchUrl" . | quote }}
+            - name: OPENSEARCH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: log-monitor-secrets
+                  key: opensearch-username
+                  optional: true
+            - name: OPENSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: log-monitor-secrets
+                  key: opensearch-password
+                  optional: true
+            - name: REDIS_URL
+              value: {{ include "log-monitor.redisUrl" . | quote }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: log-monitor-secrets
+                  key: jwt-secret
+            - name: KAFKA_BROKERS
+              value: {{ include "log-monitor.kafkaBootstrap" . | quote }}
+            - name: KAFKA_ANOMALY_TOPIC
+              value: anomaly-events
+            - name: KAFKA_CONSUMER_GROUP_SSE
+              value: api-sse
+            - name: RATE_LIMIT_REQUESTS
+              value: {{ .Values.api.rateLimitRequests | quote }}
+            - name: RATE_LIMIT_WINDOW_SECONDS
+              value: {{ .Values.api.rateLimitWindowSeconds | quote }}
+            - name: SERVICE_REGISTRY_PATH
+              value: /app/service_registry.json
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}

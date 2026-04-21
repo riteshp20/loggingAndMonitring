@@ -1,0 +1,179 @@
+---
+# ── Flink JobManager ──────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-jobmanager
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/name: flink-jobmanager
+spec:
+  replicas: {{ .Values.flink.jobmanager.replicas }}
+  selector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "flink-jobmanager" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "log-monitor.podLabels" (dict "component" "flink-jobmanager" "root" .) | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/flink/configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsUser: 9999
+        runAsNonRoot: true
+        fsGroup: 9999
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: jobmanager
+          image: {{ .Values.flink.image }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          args: [jobmanager]
+          ports:
+            - name: rpc
+              containerPort: 6123
+            - name: blob
+              containerPort: 6124
+            - name: ui
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /overview
+              port: 8081
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /overview
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.flink.jobmanager.resources | nindent 12 }}
+          volumeMounts:
+            - name: flink-config
+              mountPath: /opt/flink/conf/flink-conf.yaml
+              subPath: flink-conf.yaml
+            - name: flink-config
+              mountPath: /opt/flink/conf/log4j-console.properties
+              subPath: log4j-console.properties
+            - name: checkpoints
+              mountPath: /flink-checkpoints
+      volumes:
+        - name: flink-config
+          configMap:
+            name: flink-config
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: flink-checkpoints
+---
+# ── Flink TaskManager ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-taskmanager
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/name: flink-taskmanager
+spec:
+  replicas: {{ .Values.flink.taskmanager.replicas }}
+  selector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "flink-taskmanager" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "log-monitor.podLabels" (dict "component" "flink-taskmanager" "root" .) | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/flink/configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsUser: 9999
+        runAsNonRoot: true
+        fsGroup: 9999
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: taskmanager
+          image: {{ .Values.flink.image }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          args: [taskmanager]
+          ports:
+            - name: data
+              containerPort: 6121
+            - name: rpc
+              containerPort: 6122
+          livenessProbe:
+            tcpSocket:
+              port: 6122
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 6122
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.flink.taskmanager.resources | nindent 12 }}
+          volumeMounts:
+            - name: flink-config
+              mountPath: /opt/flink/conf/flink-conf.yaml
+              subPath: flink-conf.yaml
+            - name: flink-config
+              mountPath: /opt/flink/conf/log4j-console.properties
+              subPath: log4j-console.properties
+            - name: checkpoints
+              mountPath: /flink-checkpoints
+      volumes:
+        - name: flink-config
+          configMap:
+            name: flink-config
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: flink-checkpoints
+---
+# ── Shared checkpoint PVC ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-checkpoints
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteMany]
+  {{- if .Values.flink.checkpointStorage.storageClass }}
+  storageClassName: {{ .Values.flink.checkpointStorage.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.flink.checkpointStorage.size }}
+---
+# ── JobManager Service ────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-jobmanager
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/name: flink-jobmanager
+spec:
+  selector:
+    {{- include "log-monitor.selectorLabels" (dict "component" "flink-jobmanager" "root" .) | nindent 4 }}
+  ports:
+    - name: rpc
+      port: 6123
+    - name: blob
+      port: 6124
+    - name: ui
+      port: 8081

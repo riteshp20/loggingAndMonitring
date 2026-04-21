@@ -1,0 +1,31 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: anomaly-detector-netpol
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "anomaly-detector" "root" .) | nindent 6 }}
+  policyTypes: [Egress]
+  # No ingress — this is a pure consumer/producer; nothing calls into it
+  egress:
+    - ports:
+        - port: 9092
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kafka
+    - ports:
+        - port: 6379
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
