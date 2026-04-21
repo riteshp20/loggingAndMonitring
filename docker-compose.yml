@@ -294,6 +294,28 @@ services:
     networks:
       - monitoring
 
+  # ── Redis — baseline + suppression state store (Phase 2) ─────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - monitoring
+
   # ── Log generator (dev / load test only) ──────────────────────────────────
   log-generator:
     build:
