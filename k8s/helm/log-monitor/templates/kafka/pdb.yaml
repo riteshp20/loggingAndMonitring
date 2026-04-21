@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kafka-pdb
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.kafka.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "kafka" "root" .) | nindent 6 }}

@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-config
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+data:
+  KAFKA_KRAFT_CLUSTER_ID:                        {{ .Values.kafka.kraftClusterId | quote }}
+  KAFKA_CFG_PROCESS_ROLES:                       "broker,controller"
+  KAFKA_CFG_CONTROLLER_LISTENER_NAMES:           "CONTROLLER"
+  KAFKA_CFG_INTER_BROKER_LISTENER_NAME:          "PLAINTEXT"
+  KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP:      "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+  KAFKA_CFG_CONTROLLER_QUORUM_VOTERS:            >-
+    {{- $ns := include "log-monitor.namespace" . -}}
+    {{- $voters := list -}}
+    {{- range $i, $e := until (int .Values.kafka.replicas) -}}
+    {{- $voters = append $voters (printf "%d@kafka-%d.kafka-headless.%s.svc.cluster.local:9093" (add1 $i) $i $ns) -}}
+    {{- end -}}
+    {{ join "," $voters }}
+  KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE:           {{ .Values.kafka.config.autoCreateTopicsEnable | quote }}
+  KAFKA_CFG_DEFAULT_REPLICATION_FACTOR:          {{ .Values.kafka.config.defaultReplicationFactor | quote }}
+  KAFKA_CFG_MIN_INSYNC_REPLICAS:                 {{ .Values.kafka.config.minInsyncReplicas | quote }}
+  KAFKA_CFG_NUM_PARTITIONS:                      {{ .Values.kafka.config.numPartitions | quote }}
+  KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR:    {{ .Values.kafka.config.defaultReplicationFactor | quote }}
+  KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: {{ .Values.kafka.config.defaultReplicationFactor | quote }}
+  KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR:       {{ .Values.kafka.config.minInsyncReplicas | quote }}
+  KAFKA_CFG_LOG_RETENTION_HOURS:                 {{ .Values.kafka.config.logRetentionHours | quote }}
+  KAFKA_CFG_MESSAGE_MAX_BYTES:                   {{ .Values.kafka.config.messageMaxBytes | quote }}
+  KAFKA_CFG_UNCLEAN_LEADER_ELECTION_ENABLE:      {{ .Values.kafka.config.uncleanLeaderElectionEnable | quote }}
+  KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS:    "3000"
+  KAFKA_CFG_NUM_IO_THREADS:                      "8"
+  KAFKA_CFG_NUM_NETWORK_THREADS:                 "3"
+  ALLOW_PLAINTEXT_LISTENER:                      "yes"

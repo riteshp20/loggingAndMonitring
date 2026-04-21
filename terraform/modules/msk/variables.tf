@@ -1,0 +1,9 @@
+variable "name"               { type = string }
+variable "kafka_version"      { type = string }
+variable "instance_type"      { type = string }
+variable "broker_count"       { type = number }
+variable "storage_gb"         { type = number }
+variable "vpc_id"             { type = string }
+variable "private_subnet_ids" { type = list(string) }
+variable "eks_sg_id"          { type = string }
+variable "kms_key_arn"        { type = string }

@@ -1,0 +1,97 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flink-jobmanager-netpol
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "flink-jobmanager" "root" .) | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - port: 6123
+        - port: 6124
+        - port: 8081
+      from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: flink-taskmanager
+  egress:
+    - ports:
+        - port: 6121
+        - port: 6122
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: flink-taskmanager
+    - ports:
+        - port: 9092
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kafka
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flink-taskmanager-netpol
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "flink-taskmanager" "root" .) | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - port: 6121
+        - port: 6122
+      from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: flink-jobmanager
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: flink-taskmanager
+  egress:
+    - ports:
+        - port: 6123
+        - port: 6124
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: flink-jobmanager
+    - ports:
+        - port: 6121
+        - port: 6122
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: flink-taskmanager
+    - ports:
+        - port: 9092
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kafka
+    - ports:
+        - port: 9200
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: opensearch
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

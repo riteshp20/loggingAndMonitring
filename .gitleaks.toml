@@ -1,0 +1,41 @@
+# Gitleaks configuration
+# Docs: https://github.com/gitleaks/gitleaks
+
+title = "log-monitor gitleaks config"
+
+[extend]
+# Extend the default ruleset from the official repo
+useDefault = true
+
+# ── Allow-list — test fixtures and example files ─────────────────────────────
+
+[[allowlist.regexes]]
+description = "Example / placeholder API keys in documentation"
+regex       = '''(sk-ant-example|change-me-in-production|YOUR_TERRAFORM_STATE_BUCKET|xoxb-example)'''
+
+[[allowlist.paths]]
+description = ".env.example is intentionally empty / placeholder values"
+regex       = '''\.env\.example$'''
+
+[[allowlist.paths]]
+description = "Terraform example vars file"
+regex       = '''terraform\.tfvars\.example$'''
+
+[[allowlist.commits]]
+description = "Bootstrap commit — no real secrets"
+# Add SHA of any historical commits that contain intentional test values
+# sha = "abc123..."
+
+# ── Extra rules for this project ──────────────────────────────────────────────
+
+[[rules]]
+id          = "anthropic-api-key"
+description = "Anthropic API key"
+regex       = '''sk-ant-[a-zA-Z0-9\-_]{20,}'''
+tags        = ["key", "anthropic"]
+
+[[rules]]
+id          = "jwt-secret-inline"
+description = "JWT secret assigned inline"
+regex       = '''(?i)(jwt[_\-]?secret|jwt[_\-]?key)\s*[:=]\s*['"]?[a-zA-Z0-9+/]{32,}'''
+tags        = ["key", "jwt"]

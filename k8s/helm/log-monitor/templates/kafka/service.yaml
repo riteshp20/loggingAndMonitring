@@ -1,0 +1,38 @@
+---
+# Headless service — gives each broker a stable DNS name:
+#   kafka-{0,1,2}.kafka-headless.<ns>.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/name: kafka
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true   # needed during initial cluster formation
+  selector:
+    {{- include "log-monitor.selectorLabels" (dict "component" "kafka" "root" .) | nindent 4 }}
+  ports:
+    - name: plaintext
+      port: 9092
+    - name: controller
+      port: 9093
+---
+# ClusterIP service — used by bootstrap clients that don't need per-broker addressing
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/name: kafka
+spec:
+  selector:
+    {{- include "log-monitor.selectorLabels" (dict "component" "kafka" "root" .) | nindent 4 }}
+  ports:
+    - name: plaintext
+      port: 9092
+      targetPort: 9092

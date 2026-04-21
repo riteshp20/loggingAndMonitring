@@ -1,0 +1,83 @@
+# Production overrides — merge on top of values.yaml
+# Usage:
+#   helm upgrade --install log-monitor ./log-monitor \
+#     -f values-prod.yaml \
+#     --set secrets.anthropicApiKey=$ANTHROPIC_API_KEY \
+#     --set secrets.jwtSecret=$JWT_SECRET
+
+global:
+  image:
+    pullPolicy: Always
+
+kafka:
+  storage:
+    size: 200Gi
+    storageClass: fast-ssd
+  resources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+
+opensearch:
+  replicas: 3
+  javaOpts: "-Xms4g -Xmx4g"
+  storage:
+    size: 500Gi
+    storageClass: fast-ssd
+  resources:
+    requests:
+      cpu: "2"
+      memory: 8Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+  disableSecurity: false
+
+redis:
+  maxmemory: 2gb
+  storage:
+    size: 20Gi
+    storageClass: fast-ssd
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+flink:
+  taskmanager:
+    replicas: 4
+    taskSlots: 8
+    resources:
+      requests:
+        cpu: "4"
+        memory: 8Gi
+      limits:
+        cpu: "8"
+        memory: 8Gi
+  checkpointStorage:
+    storageClass: fast-ssd
+
+anomalyDetector:
+  replicas: 2
+  hpa:
+    minReplicas: 2
+    maxReplicas: 10
+
+incidentReporter:
+  replicas: 2
+  dashboardBaseUrl: "https://dashboards.prod.example.com"
+
+api:
+  replicas: 3
+  hpa:
+    minReplicas: 3
+    maxReplicas: 20
+  ingress:
+    host: api.prod.example.com
+    tlsSecretName: log-monitor-api-tls-prod

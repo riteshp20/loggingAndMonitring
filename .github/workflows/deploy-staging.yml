@@ -1,0 +1,229 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Staging deployment pipeline
+#
+# Triggered on every merge to main.
+# Build → push to ECR → deploy to EKS staging namespace via Helm.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Deploy — staging
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false   # never cancel an in-flight deployment
+
+permissions:
+  contents: read
+  id-token: write    # required for OIDC → AWS auth
+  packages: read
+
+env:
+  AWS_REGION:        us-east-1
+  ECR_REGISTRY:      ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  EKS_CLUSTER:       log-monitor-staging
+  HELM_RELEASE:      log-monitor
+  HELM_NAMESPACE:    log-monitor-staging
+  HELM_CHART:        k8s/helm/log-monitor
+
+jobs:
+
+  # ── 1. Determine which services changed ────────────────────────────────────
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-24.04
+    outputs:
+      anomaly_detector:  ${{ steps.filter.outputs.anomaly_detector }}
+      incident_reporter: ${{ steps.filter.outputs.incident_reporter }}
+      api:               ${{ steps.filter.outputs.api }}
+      flink:             ${{ steps.filter.outputs.flink }}
+      fluent_bit:        ${{ steps.filter.outputs.fluent_bit }}
+      helm:              ${{ steps.filter.outputs.helm }}
+      terraform:         ${{ steps.filter.outputs.terraform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            anomaly_detector:
+              - 'anomaly-detector/**'
+            incident_reporter:
+              - 'incident-reporter/**'
+            api:
+              - 'api/**'
+            flink:
+              - 'flink-log-processor/**'
+            fluent_bit:
+              - 'fluent-bit/**'
+            helm:
+              - 'k8s/**'
+            terraform:
+              - 'terraform/**'
+
+  # ── 2. Build and push changed images to ECR ────────────────────────────────
+  build-push:
+    name: Build & push / ${{ matrix.service }}
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: |
+      (matrix.service == 'anomaly-detector'  && needs.changes.outputs.anomaly_detector  == 'true') ||
+      (matrix.service == 'incident-reporter' && needs.changes.outputs.incident_reporter == 'true') ||
+      (matrix.service == 'api'               && needs.changes.outputs.api               == 'true') ||
+      (matrix.service == 'flink-log-processor' && needs.changes.outputs.flink           == 'true') ||
+      (matrix.service == 'fluent-bit'        && needs.changes.outputs.fluent_bit        == 'true')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: anomaly-detector
+            context: anomaly-detector
+          - service: incident-reporter
+            context: incident-reporter
+          - service: api
+            context: api
+          - service: flink-log-processor
+            context: flink-log-processor
+          - service: fluent-bit
+            context: fluent-bit
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names log-monitor/${{ matrix.service }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null \
+          || aws ecr create-repository \
+            --repository-name log-monitor/${{ matrix.service }} \
+            --image-scanning-configuration scanOnPush=true \
+            --encryption-configuration encryptionType=KMS \
+            --region ${{ env.AWS_REGION }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/log-monitor/${{ matrix.service }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=staging
+            type=raw,value=main
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to:   type=gha,scope=${{ matrix.service }},mode=max
+          provenance: true    # SLSA provenance attestation
+          sbom: true          # Software Bill of Materials
+
+      - name: Scan pushed image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/log-monitor/${{ matrix.service }}:sha-${{ github.sha }}
+          format: table
+          severity: CRITICAL
+          exit-code: 1
+          ignore-unfixed: true
+
+  # ── 3. Deploy to staging ───────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to staging
+    runs-on: ubuntu-24.04
+    needs: build-push
+    environment:
+      name: staging
+      url: https://api-staging.log-monitor.example.com/docs
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ env.EKS_CLUSTER }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.2
+
+      - name: Helm upgrade — staging
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
+          helm upgrade --install ${{ env.HELM_RELEASE }} ${{ env.HELM_CHART }} \
+            --namespace ${{ env.HELM_NAMESPACE }} \
+            --create-namespace \
+            --atomic \
+            --timeout 10m \
+            --history-max 5 \
+            -f ${{ env.HELM_CHART }}/values.yaml \
+            --set global.image.tag=sha-${SHORT_SHA} \
+            --set global.image.registry=${{ env.ECR_REGISTRY }} \
+            --set secrets.anthropicApiKey="${{ secrets.ANTHROPIC_API_KEY }}" \
+            --set secrets.jwtSecret="${{ secrets.JWT_SECRET_STAGING }}" \
+            --set secrets.slackBotToken="${{ secrets.SLACK_BOT_TOKEN }}" \
+            --set secrets.pagerdutyRoutingKey="${{ secrets.PAGERDUTY_ROUTING_KEY_STAGING }}" \
+            --set api.ingress.host=api-staging.log-monitor.example.com
+
+      - name: Smoke test — health endpoint
+        run: |
+          echo "Waiting for API rollout..."
+          kubectl rollout status deployment/api \
+            -n ${{ env.HELM_NAMESPACE }} --timeout=300s
+
+          echo "Hitting /api/health..."
+          for i in $(seq 1 10); do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+              https://api-staging.log-monitor.example.com/api/health || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Health check passed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: status=$STATUS, retrying in 10s..."
+            sleep 10
+          done
+          echo "❌ Health check failed after 10 attempts"
+          exit 1
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "❌ Staging deploy failed for <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ github.sha }}>",
+              "channel": "#deployments"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DEPLOY_WEBHOOK }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

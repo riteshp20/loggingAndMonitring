@@ -1,0 +1,14 @@
+apiVersion: v2
+name: log-monitor
+description: AI-powered log monitoring agent — Kafka · Flink · OpenSearch · Redis · API
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - logging
+  - monitoring
+  - kafka
+  - flink
+  - opensearch
+maintainers:
+  - name: platform-team

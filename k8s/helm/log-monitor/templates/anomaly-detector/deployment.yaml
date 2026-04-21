@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anomaly-detector
+  namespace: {{ include "log-monitor.namespace" . }}
+  labels:
+    {{- include "log-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/name: anomaly-detector
+spec:
+  replicas: {{ .Values.anomalyDetector.replicas }}
+  selector:
+    matchLabels:
+      {{- include "log-monitor.selectorLabels" (dict "component" "anomaly-detector" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "log-monitor.podLabels" (dict "component" "anomaly-detector" "root" .) | nindent 8 }}
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
+        runAsGroup: 1000
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: anomaly-detector
+          image: {{ .Values.anomalyDetector.image }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          env:
+            - name: KAFKA_BROKERS
+              value: {{ include "log-monitor.kafkaBootstrap" . | quote }}
+            - name: KAFKA_INPUT_TOPIC
+              value: {{ .Values.flink.job.outputTopic | quote }}
+            - name: KAFKA_ANOMALY_TOPIC
+              value: anomaly-events
+            - name: KAFKA_CONSUMER_GROUP
+              value: anomaly-detector
+            - name: REDIS_URL
+              value: {{ include "log-monitor.redisUrl" . | quote }}
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - |
+                  import redis, os
+                  redis.from_url(os.environ['REDIS_URL']).ping()
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - |
+                  import redis, os
+                  redis.from_url(os.environ['REDIS_URL']).ping()
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.anomalyDetector.resources | nindent 12 }}
