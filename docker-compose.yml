@@ -294,6 +294,42 @@ services:
     networks:
       - monitoring
 
+  # ── OpenSearch — log storage + incident-reports index (Phase 3) ─────────
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: opensearch
+    environment:
+      - discovery.type=single-node
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - DISABLE_SECURITY_PLUGIN=true
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.13.0
+    container_name: opensearch-dashboards
+    ports:
+      - "127.0.0.1:5601:5601"
+    environment:
+      - OPENSEARCH_HOSTS=http://opensearch:9200
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    depends_on:
+      opensearch: { condition: service_healthy }
+    restart: unless-stopped
+    networks:
+      - monitoring
+
   # ── Redis — baseline + suppression state store (Phase 2) ─────────────────
   redis:
     image: redis:7.2-alpine
@@ -312,6 +348,30 @@ services:
       timeout: 3s
       retries: 10
       start_period: 5s
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ── Incident Reporter — AI report generator (Phase 3) ────────────────────
+  incident-reporter:
+    build:
+      context: ./incident-reporter
+      dockerfile: Dockerfile
+    image: log-agent/incident-reporter:latest
+    container_name: incident-reporter
+    depends_on:
+      kafka-1:     { condition: service_healthy }
+      kafka-2:     { condition: service_healthy }
+      kafka-3:     { condition: service_healthy }
+      kafka-init:  { condition: service_completed_successfully }
+      opensearch:  { condition: service_healthy }
+    environment:
+      KAFKA_BROKERS:          kafka-1:9092,kafka-2:9092,kafka-3:9092
+      KAFKA_ANOMALY_TOPIC:    anomaly-events
+      KAFKA_CONSUMER_GROUP:   incident-reporter
+      OPENSEARCH_URL:         http://opensearch:9200
+      SERVICE_REGISTRY_PATH:  /app/service_registry.json
+      ANTHROPIC_API_KEY:      ${ANTHROPIC_API_KEY:-}
     restart: unless-stopped
     networks:
       - monitoring
@@ -345,6 +405,7 @@ volumes:
   localstack_data:  { driver: local }
   fluent_bit_state: { driver: local }
   app_logs:         { driver: local }
+  opensearch_data:  { driver: local }
 
 # ── Networks ───────────────────────────────────────────────────────────────────
 networks:

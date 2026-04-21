@@ -334,3 +334,203 @@ affinity so all events for the same service land on the same partition in order.
 | Port | Protocol | Service |
 |---|---|---|
 | 6379 | TCP | Redis (baselines, suppression state, IF models) |
+
+---
+
+# Phase 3 — AI Incident Report Generator
+
+Consumes `AnomalyEvent` records from the `anomaly-events` Kafka topic, enriches
+them with live OpenSearch context, scrubs PII, generates a structured incident
+report using the Claude API, and stores the result in OpenSearch for downstream
+alerting and dashboards.
+
+## Commands
+
+```bash
+# Run the full test suite (240 tests, no external services required)
+cd incident-reporter
+pip install -r requirements.txt
+python -m pytest tests/ -v
+
+# Start the incident reporter against the running stack
+docker compose up -d --build incident-reporter
+
+# Tail incident reporter logs
+docker compose logs -f incident-reporter
+
+# Inspect stored incident reports in OpenSearch
+curl -s "http://localhost:9200/incident-reports/_search?pretty&size=5"
+
+# Inspect incoming anomaly events (Phase 2 output / Phase 3 input)
+docker compose exec kafka \
+  kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic anomaly-events --from-beginning --max-messages 5
+```
+
+## Architecture
+
+```
+anomaly-events (Kafka)
+  AnomalyEvent JSON records
+          │
+          ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │               IncidentReportPipeline                       │
+  │                                                            │
+  │  ┌─────────────────────────────────────────────────────┐  │
+  │  │  Stage 1 — EnrichmentService                        │  │
+  │  │  (parallel OpenSearch fetches + service registry)   │  │
+  │  │  • log_samples   → logs-* index  (±5 min window)   │  │
+  │  │  • correlated    → incident-reports (±2 min)        │  │
+  │  │  • deployments   → deployments index (last 3)       │  │
+  │  │  • oncall_owner  → service_registry.json            │  │
+  │  └──────────────────────────┬──────────────────────────┘  │
+  │                             │ EnrichedAnomalyEvent         │
+  │  ┌──────────────────────────▼──────────────────────────┐  │
+  │  │  Stage 2 — PiiScrubber                              │  │
+  │  │  Redacts email, credit card, phone, IPv4, IPv6      │  │
+  │  │  before any data leaves the service boundary        │  │
+  │  └──────────────────────────┬──────────────────────────┘  │
+  │                             │ scrubbed EnrichedAnomalyEvent│
+  │  ┌──────────────────────────▼──────────────────────────┐  │
+  │  │  Stage 3 — ClaudeReportGenerator                    │  │
+  │  │  claude-sonnet-4-20250514 · max_tokens=800          │  │
+  │  │  Retry (×3, exponential backoff) on transient err   │  │
+  │  │  Fallback report (ai_generated=False) when API down │  │
+  │  └──────────────────────────┬──────────────────────────┘  │
+  │                             │ IncidentReport               │
+  │  ┌──────────────────────────▼──────────────────────────┐  │
+  │  │  Stage 4 — ReportStore                              │  │
+  │  │  Indexes doc into incident-reports (OpenSearch)     │  │
+  │  │  doc_id = event_id  (links report ↔ AnomalyEvent)  │  │
+  │  │  Store failure is non-fatal — report still returned │  │
+  │  └─────────────────────────────────────────────────────┘  │
+  └────────────────────────────────────────────────────────────┘
+          │
+          ▼
+  incident-reports (OpenSearch)
+  IncidentReport JSON documents
+```
+
+## Four-stage pipeline
+
+### Stage 1 — Enrichment (`enrichment/`)
+
+Three OpenSearch queries run in parallel via `ThreadPoolExecutor(max_workers=3)`:
+
+| Query | Index | Window | Purpose |
+|---|---|---|---|
+| Log samples | `logs-*` | −5 min / +1 min | Raw log lines near the anomaly |
+| Correlated anomalies | `incident-reports` | ±2 min | Other services firing at the same time |
+| Recent deployments | `deployments` | last 3 docs | Recent changes that may explain the anomaly |
+
+On-call owner is looked up synchronously from `service_registry.json`.  The
+`"default"` key is a fallback for services not in the registry.
+
+### Stage 2 — PII scrubbing (`pii/`)
+
+Applied to `log_samples`, `top_log_samples`, `correlated_anomalies`, and
+`recent_deployments` **before** the enriched event is passed to Claude.  The
+`oncall_owner` block is intentionally not scrubbed (pager addresses must stay
+intact).
+
+| Pattern | Replacement |
+|---|---|
+| Email addresses | `[EMAIL REDACTED]` |
+| Credit card numbers (Visa/MC/Amex/Discover) | `[CC REDACTED]` |
+| Phone numbers (US formats, E.164) | `[PHONE REDACTED]` |
+| IPv4 addresses | `[IPv4 REDACTED]` |
+| IPv6 addresses | `[IPv6 REDACTED]` |
+
+`pii_scrub_count` accumulates the total number of substitutions and is stored on
+the `IncidentReport` for audit purposes.  The scrubber never mutates its input —
+it returns a new `EnrichedAnomalyEvent` via `dataclasses.replace()`.
+
+### Stage 3 — Claude report generation (`report/`)
+
+The generator builds a structured SRE-persona prompt and calls the Anthropic API:
+
+- **Model**: `claude-sonnet-4-20250514`
+- **max_tokens**: 800 · **temperature**: 0.2
+- **Retry policy**: up to 3 attempts; sleeps `2^attempt` seconds on
+  `RateLimitError`, `APIConnectionError`, `APITimeoutError`, `InternalServerError`
+- **Fallback**: `AuthenticationError` and `BadRequestError` are not retried.
+  Any unrecoverable failure produces a rule-based fallback report with
+  `ai_generated=False` and `confidence_score=0.0`.
+
+JSON extraction uses a three-strategy cascade: direct parse → strip markdown
+fences → brace-boundary extraction.
+
+### Stage 4 — OpenSearch storage (`storage/`)
+
+`ReportStore.store()` calls `index_document(index="incident-reports", doc_id=report.event_id, ...)`.
+Using `event_id` as the document ID makes re-processing idempotent (same event
+overwrites the previous report) and lets any component that holds an
+`AnomalyEvent` reference look up the corresponding report without a search.
+
+`ensure_index()` is called once on startup and is a no-op if the index already
+exists.
+
+## `IncidentReport` schema
+
+| Field | Type | Description |
+|---|---|---|
+| `report_id` | UUID4 string | Unique report identifier |
+| `event_id` | UUID4 string | Links back to the originating `AnomalyEvent` |
+| `service` | string | Service that triggered the anomaly |
+| `severity` | P1 / P2 / P3 | Inherited from the anomaly event |
+| `anomaly_type` | string | `zscore_critical` / `both_tiers` / `system_wide_incident` |
+| `timestamp` | ISO-8601 UTC | Anomaly timestamp |
+| `generated_at` | ISO-8601 UTC | Report generation timestamp |
+| `summary` | string | ≤ 2-sentence human summary |
+| `affected_services` | list[str] | All services impacted |
+| `probable_cause` | string | Root cause hypothesis |
+| `evidence` | list[str] | Supporting data points |
+| `suggested_actions` | list[str] | Ordered remediation steps |
+| `estimated_user_impact` | string | User-facing impact description |
+| `confidence_score` | float 0–1 | AI confidence; 0.0 for fallback reports |
+| `ai_generated` | bool | False when Claude was unavailable |
+| `oncall_owner` | dict | On-call routing data from service registry |
+| `z_score` | float | Max \|z\| from Tier 1 detection |
+| `observed_metrics` | dict | Raw metric values that triggered the anomaly |
+| `baseline_metrics` | dict | EWMA baseline snapshot at detection time |
+| `pii_scrub_count` | int | Total PII substitutions made before Claude call |
+
+## Key files
+
+| File | Purpose |
+|---|---|
+| `incident-reporter/pipeline.py` | `IncidentReportPipeline` — wires all four stages |
+| `incident-reporter/main.py` | Kafka consumer entry point; reads `anomaly-events` |
+| `incident-reporter/models.py` | `EnrichedAnomalyEvent` and `EnrichedContext` dataclasses |
+| `incident-reporter/enrichment/enricher.py` | `EnrichmentService` — parallel OpenSearch + registry lookup |
+| `incident-reporter/enrichment/opensearch_client.py` | All OpenSearch I/O; `with_raw_client()` factory for tests |
+| `incident-reporter/enrichment/registry.py` | `ServiceRegistry` — on-call owner lookup from JSON |
+| `incident-reporter/pii/scrubber.py` | `PiiScrubber` — immutable scrub with count tracking |
+| `incident-reporter/pii/patterns.py` | Compiled regex patterns for all five PII types |
+| `incident-reporter/report/claude_client.py` | `ClaudeReportGenerator` — API call, retry, fallback |
+| `incident-reporter/report/prompt_builder.py` | System prompt + user message assembly |
+| `incident-reporter/report/models.py` | `IncidentReport` dataclass + serialisation |
+| `incident-reporter/storage/report_store.py` | `ReportStore` — OpenSearch persistence + index management |
+| `incident-reporter/service_registry.json` | On-call routing for 8 services + default fallback |
+| `incident-reporter/tests/` | 240 unit tests (mocked I/O, no external services needed) |
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `KAFKA_BROKERS` | `kafka-1:9092,kafka-2:9092,kafka-3:9092` | Bootstrap servers |
+| `KAFKA_ANOMALY_TOPIC` | `anomaly-events` | Source topic (AnomalyEvent records) |
+| `KAFKA_CONSUMER_GROUP` | `incident-reporter` | Consumer group ID |
+| `OPENSEARCH_URL` | `http://opensearch:9200` | OpenSearch connection URL |
+| `OPENSEARCH_USERNAME` | _(empty)_ | OpenSearch basic-auth username |
+| `OPENSEARCH_PASSWORD` | _(empty)_ | OpenSearch basic-auth password |
+| `SERVICE_REGISTRY_PATH` | `service_registry.json` | Path to on-call registry JSON |
+| `ANTHROPIC_API_KEY` | _(required)_ | Anthropic API key for Claude report generation |
+
+## Ports (Phase 3)
+
+| Port | Protocol | Service |
+|---|---|---|
+| 9200 | TCP | OpenSearch REST API + document storage |
+| 5601 | TCP | OpenSearch Dashboards |
