@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse
 
 import jwt as pyjwt
 from config import JWT_ALGORITHM, JWT_SECRET
+from metrics import ACTIVE_SSE_CONNECTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,7 @@ async def _event_stream(
     q: asyncio.Queue,
     service_filter: Optional[str],
 ) -> AsyncGenerator[str, None]:
+    ACTIVE_SSE_CONNECTIONS.inc()
     yield _sse("connected", json.dumps({"subscribers": bus.subscriber_count}))
 
     try:
@@ -155,6 +157,7 @@ async def _event_stream(
     except asyncio.CancelledError:
         pass
     finally:
+        ACTIVE_SSE_CONNECTIONS.dec()
         bus.unsubscribe(q)
         logger.debug("SSE client disconnected, %d remaining", bus.subscriber_count)
 

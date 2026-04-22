@@ -1,0 +1,160 @@
+groups:
+
+  # ── Self-monitoring: alert on the alerting system itself ──────────────────
+  #
+  # These rules fire PagerDuty incidents via Alertmanager when the
+  # log-monitor platform is degraded — not when user services are anomalous.
+  #
+  # Severity labels map to PagerDuty severity:
+  #   critical → P1 (wakes someone up immediately)
+  #   warning  → P2 (next business hour review)
+
+  - name: pipeline.kafka_lag
+    interval: 30s          # evaluate this group every 30 s (overrides global 15 s)
+    rules:
+
+      # ── Rule 1 — Kafka consumer lag ──────────────────────────────────────
+      # The anomaly-detector reports its own consumer-group lag.
+      # Sustained lag above 100K means the detector is falling behind the
+      # processed-logs topic — anomaly detection is delayed or stalled.
+
+      - alert: KafkaConsumerLagHigh
+        expr: sum(kafka_consumer_lag) > 100000
+        for: 2m          # must be true for 2 consecutive minutes before firing
+        labels:
+          severity: critical
+          team: platform
+          component: anomaly-detector
+        annotations:
+          summary: "Kafka consumer lag is critically high ({{ $value | humanize }} messages)"
+          description: >
+            The anomaly-detector consumer group has {{ $value | humanize }} unread messages
+            on the processed-logs topic. At current ingestion rate this causes detection
+            delays and may lead to missed incidents. Investigate whether the detector
+            pod is running, whether it is OOMKilled, or whether a traffic spike has
+            overwhelmed processing capacity.
+          runbook_url: "https://github.com/YOUR_ORG/YOUR_REPO/wiki/runbooks/kafka-lag"
+          dashboard_url: "http://localhost:3000/d/log-monitor-pipeline/pipeline-health"
+
+      - alert: KafkaConsumerLagWarning
+        expr: sum(kafka_consumer_lag) > 10000
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: anomaly-detector
+        annotations:
+          summary: "Kafka consumer lag is elevated ({{ $value | humanize }} messages)"
+          description: >
+            Consumer group lag has been above 10K messages for 5 minutes.
+            Not yet critical but trending in the wrong direction.
+          dashboard_url: "http://localhost:3000/d/log-monitor-pipeline/pipeline-health"
+
+  # ── Rule 2 — End-to-end latency ──────────────────────────────────────────
+  - name: pipeline.e2e_latency
+    interval: 60s
+    rules:
+
+      - alert: EndToEndLatencyHigh
+        expr: >
+          histogram_quantile(0.99,
+            sum by (le) (rate(processing_latency_seconds_bucket[5m]))
+          )
+          +
+          histogram_quantile(0.99,
+            sum by (le) (rate(report_pipeline_latency_seconds_bucket[5m]))
+          )
+          > 60
+        for: 5m          # SLA breach must persist 5 min before waking someone up
+        labels:
+          severity: critical
+          team: platform
+          component: pipeline
+        annotations:
+          summary: "End-to-end latency p99 exceeds 60-second SLA ({{ $value | humanizeDuration }})"
+          description: >
+            The combined p99 latency of the anomaly-detector pipeline and the
+            incident-report pipeline has exceeded 60 seconds for 5 consecutive minutes.
+            Users will experience delayed or missing alerts. Check the Claude API
+            response times (report_pipeline_latency_seconds) and Isolation Forest
+            retraining cycles (model_inference_latency_seconds) as the most common causes.
+          runbook_url: "https://github.com/YOUR_ORG/YOUR_REPO/wiki/runbooks/e2e-latency"
+          dashboard_url: "http://localhost:3000/d/log-monitor-sla/system-sla"
+
+      - alert: EndToEndLatencyWarning
+        expr: >
+          histogram_quantile(0.99,
+            sum by (le) (rate(processing_latency_seconds_bucket[5m]))
+          )
+          +
+          histogram_quantile(0.99,
+            sum by (le) (rate(report_pipeline_latency_seconds_bucket[5m]))
+          )
+          > 30
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+          component: pipeline
+        annotations:
+          summary: "End-to-end latency p99 is elevated ({{ $value | humanizeDuration }})"
+          description: >
+            p99 E2E latency has been above 30 s for 10 minutes.
+            Not yet breaching the 60 s SLA but worth investigating proactively.
+          dashboard_url: "http://localhost:3000/d/log-monitor-sla/system-sla"
+
+  # ── Rule 3 — Detector silence (dead-man's switch) ─────────────────────────
+  - name: pipeline.detector_heartbeat
+    interval: 60s
+    rules:
+
+      # The anomaly-detector increments model_inference_latency_seconds every
+      # time TwoTierDetector.detect() is called.  If the counter has not
+      # moved at all in a 5-minute window the detector is stalled, restarting,
+      # or has lost connectivity to its Kafka consumer.
+      #
+      # absent() handles the edge case where the metric disappears entirely
+      # (e.g. the container is down and Prometheus can no longer scrape it).
+
+      - alert: AnomalyDetectorSilent
+        expr: >
+          (
+            absent(model_inference_latency_seconds_count)
+          )
+          or
+          (
+            increase(model_inference_latency_seconds_count[5m]) == 0
+          )
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          component: anomaly-detector
+        annotations:
+          summary: "Anomaly detector has not scored any windows in the last 5 minutes"
+          description: >
+            model_inference_latency_seconds_count has not incremented for at least
+            5 minutes. The anomaly-detector is either: (1) unable to consume from
+            the processed-logs Kafka topic, (2) in a crash-restart loop, or
+            (3) the Flink job upstream has stopped emitting ServiceWindowAggregates.
+            No anomaly detection is occurring — all services are unmonitored.
+          runbook_url: "https://github.com/YOUR_ORG/YOUR_REPO/wiki/runbooks/detector-silent"
+          dashboard_url: "http://localhost:3000/d/log-monitor-detection/detection-quality"
+
+      # Resolved / cleared counterpart — fires when the detector comes back.
+      # Alertmanager auto-resolves critical alerts when the expr is no longer
+      # true, but this info annotation makes the resolve message more useful.
+      - alert: AnomalyDetectorRecovered
+        expr: increase(model_inference_latency_seconds_count[5m]) > 0
+        for: 2m
+        labels:
+          severity: info
+          team: platform
+          component: anomaly-detector
+        annotations:
+          summary: "Anomaly detector is active again ({{ $value | humanize }} windows scored in last 5 m)"
+          description: >
+            The anomaly-detector has resumed scoring ServiceWindowAggregates.
+            Verify that Kafka consumer lag has stabilised and that no windows
+            were permanently missed during the outage window.
+          dashboard_url: "http://localhost:3000/d/log-monitor-detection/detection-quality"

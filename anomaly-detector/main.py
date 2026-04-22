@@ -19,9 +19,10 @@ import logging
 import os
 import signal
 import sys
+import time
 
 import redis
-from kafka import KafkaConsumer, KafkaProducer
+from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
 from baseline.manager import BaselineManager
 from detection.detector import TwoTierDetector
@@ -30,6 +31,11 @@ from detection.tier2_isolation import IsolationForestDetector
 from suppression.suppressor import AlertSuppressor
 from events.emitter import AnomalyEventEmitter
 from pipeline import AnomalyDetectionPipeline
+from metrics import (
+    EVENTS_INGESTED,
+    KAFKA_CONSUMER_LAG,
+    start_metrics_server,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,6 +82,22 @@ def _build_pipeline() -> AnomalyDetectionPipeline:
     return AnomalyDetectionPipeline(baseline_mgr, detector, suppressor, emitter)
 
 
+def _update_consumer_lag(consumer: KafkaConsumer, topic: str) -> None:
+    """Update the kafka_consumer_lag gauge for each partition."""
+    try:
+        partitions = consumer.partitions_for_topic(topic)
+        if not partitions:
+            return
+        tps = [TopicPartition(topic, p) for p in partitions]
+        end_offsets = consumer.end_offsets(tps)
+        committed = {tp: consumer.committed(tp) or 0 for tp in tps}
+        for tp in tps:
+            lag = max(0, end_offsets[tp] - committed[tp])
+            KAFKA_CONSUMER_LAG.labels(topic=topic, partition=str(tp.partition)).set(lag)
+    except Exception:
+        pass  # non-critical; best-effort
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT,  _handle_sigterm)
@@ -83,6 +105,8 @@ def main() -> None:
     kafka_brokers  = os.getenv("KAFKA_BROKERS",  "kafka-1:9092,kafka-2:9092,kafka-3:9092")
     input_topic    = os.getenv("KAFKA_INPUT_TOPIC",    "processed-logs")
     consumer_group = os.getenv("KAFKA_CONSUMER_GROUP", "anomaly-detector")
+
+    start_metrics_server()
 
     pipeline = _build_pipeline()
     log.info("Pipeline ready — consuming from %s", input_topic)
@@ -96,16 +120,28 @@ def main() -> None:
         enable_auto_commit=True,
     )
 
+    lag_update_interval = 30  # seconds
+    last_lag_update = 0.0
+
     try:
         for msg in consumer:
             if _SHUTDOWN:
                 break
+
+            # Periodically refresh consumer lag gauge
+            now = time.time()
+            if now - last_lag_update >= lag_update_interval:
+                _update_consumer_lag(consumer, input_topic)
+                last_lag_update = now
+
             record = msg.value
             if record.get("RECORD_TYPE") != "SERVICE_WINDOW_AGGREGATE":
                 continue
             service  = record.get("service", "unknown")
             features = _extract_features(record)
             top_logs = record.get("topErrors", [])
+
+            EVENTS_INGESTED.labels(service=service).inc()
 
             try:
                 event = pipeline.process_window(service, features, top_logs)
