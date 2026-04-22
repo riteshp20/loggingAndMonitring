@@ -24,6 +24,7 @@ from alert_router.rate_limiter import RateLimiter
 from alert_router.digest import DigestBuffer
 from alert_router.slack.notifier import SlackNotifier
 from alert_router.pagerduty.client import PagerDutyClient
+from metrics import ALERTS_SENT, ALERTS_SUPPRESSED
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ class AlertDispatcher:
 
         if not allowed:
             count = self._digest.add(report)
+            ALERTS_SUPPRESSED.labels(service=report.service, reason="rate_limited").inc()
             logger.warning(
                 "Alert rate-limited | service=%s severity=%s digest_pending=%d",
                 report.service, report.severity, count,
@@ -94,6 +96,8 @@ class AlertDispatcher:
         pagerduty_triggered = False
         if decision.send_pagerduty and self._pd is not None:
             pagerduty_triggered = self._pd.notify(report)
+            if pagerduty_triggered:
+                ALERTS_SENT.labels(severity=report.severity, channel="pagerduty").inc()
 
         # ── Slack ─────────────────────────────────────────────────────────────
         slack_notified: list[str] = []
@@ -102,6 +106,7 @@ class AlertDispatcher:
                 ts = self._slack.send_alert(target, report)
                 if ts is not None:
                     slack_notified.append(target)
+                    ALERTS_SENT.labels(severity=report.severity, channel="slack").inc()
 
         logger.info(
             "Alert dispatched | service=%s severity=%s pd=%s slack=%s",

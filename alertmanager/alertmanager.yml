@@ -1,0 +1,131 @@
+# Alertmanager configuration for log-monitor self-monitoring alerts.
+#
+# Routing strategy
+# ────────────────
+# critical  → PagerDuty (wakes on-call) + Slack #incidents
+# warning   → Slack #monitoring only
+# info      → Slack #monitoring only (recovery notifications)
+#
+# Grouping: alerts for the same component are batched into one incident so
+# a flapping detector does not generate a storm of PagerDuty incidents.
+#
+# The PAGERDUTY_SELFMON_ROUTING_KEY is a *separate* PagerDuty service from
+# the application-level routing key used by the incident-reporter — this
+# ensures platform alerts are never drowned out by application alerts.
+
+global:
+  resolve_timeout: 5m
+
+  # Default PagerDuty URL (Events API v2)
+  pagerduty_url: https://events.pagerduty.com/v2/enqueue
+
+  # Slack webhook used for all non-PagerDuty notifications
+  # Set SLACK_SELFMON_WEBHOOK in your environment / secrets manager.
+  slack_api_url: "${SLACK_SELFMON_WEBHOOK}"
+
+# ── Inhibition rules ──────────────────────────────────────────────────────────
+# Suppress warning-level alerts for a component while a critical alert for the
+# same component is already firing — avoids double-paging.
+inhibit_rules:
+  - source_match:
+      severity: critical
+    target_match:
+      severity: warning
+    equal: [component]
+
+  - source_match:
+      severity: critical
+    target_match:
+      severity: info
+    equal: [component]
+
+# ── Templates ────────────────────────────────────────────────────────────────
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+# ── Routing tree ──────────────────────────────────────────────────────────────
+route:
+  receiver: slack-monitoring           # default catch-all
+  group_by: [alertname, component]
+  group_wait:      30s                 # wait 30 s before sending first notification
+  group_interval:  5m                  # wait 5 m before sending a changed group
+  repeat_interval: 4h                  # re-notify every 4 h if still firing
+
+  routes:
+
+    # critical alerts → PagerDuty + Slack #incidents (parallel delivery)
+    - match:
+        severity: critical
+      receiver: pagerduty-critical
+      continue: true      # fall through so Slack also receives it
+
+    - match:
+        severity: critical
+      receiver: slack-incidents
+      group_wait: 10s     # faster for high-severity
+
+    # warning alerts → Slack #monitoring
+    - match:
+        severity: warning
+      receiver: slack-monitoring
+      repeat_interval: 2h
+
+    # info / recovery notifications → Slack #monitoring
+    - match:
+        severity: info
+      receiver: slack-monitoring
+      repeat_interval: 24h
+
+# ── Receivers ─────────────────────────────────────────────────────────────────
+receivers:
+
+  # PagerDuty — critical self-monitoring incidents
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - routing_key: "${PAGERDUTY_SELFMON_ROUTING_KEY}"
+        description: "{{ range .Alerts }}{{ .Annotations.summary }}\n{{ end }}"
+        severity: "{{ if eq .CommonLabels.severity \"critical\" }}critical{{ else }}warning{{ end }}"
+        # dedup_key groups all alerts from the same component into one PD incident
+        # Alertmanager sets this automatically via the group_by labels above.
+        client: "log-monitor-alertmanager"
+        client_url: "http://localhost:3000/d/log-monitor-pipeline/pipeline-health"
+        details:
+          component: "{{ .CommonLabels.component }}"
+          team:      "{{ .CommonLabels.team }}"
+          runbook:   "{{ (index .Alerts 0).Annotations.runbook_url }}"
+          dashboard: "{{ (index .Alerts 0).Annotations.dashboard_url }}"
+
+  # Slack — critical alerts (high-urgency channel)
+  - name: slack-incidents
+    slack_configs:
+      - channel: "#incidents"
+        username: "Alertmanager"
+        icon_emoji: ":fire:"
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        title: >-
+          [{{ .Status | toUpper }}{{ if eq .Status "firing" }} 🔥{{ end }}]
+          {{ .CommonLabels.alertname }} — {{ .CommonLabels.component }}
+        text: |
+          {{ range .Alerts }}
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          {{ if .Annotations.runbook_url }}*Runbook:* <{{ .Annotations.runbook_url }}|View Runbook>{{ end }}
+          {{ if .Annotations.dashboard_url }}*Dashboard:* <{{ .Annotations.dashboard_url }}|Open in Grafana>{{ end }}
+          {{ end }}
+        send_resolved: true
+
+  # Slack — warnings and info (low-urgency channel)
+  - name: slack-monitoring
+    slack_configs:
+      - channel: "#monitoring"
+        username: "Alertmanager"
+        icon_emoji: ":warning:"
+        color: '{{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "warning" }}warning{{ else }}#439FE0{{ end }}{{ else }}good{{ end }}'
+        title: >-
+          [{{ .Status | toUpper }}] {{ .CommonLabels.alertname }} — {{ .CommonLabels.component }}
+        text: |
+          {{ range .Alerts }}
+          *Summary:* {{ .Annotations.summary }}
+          {{ if .Annotations.dashboard_url }}*Dashboard:* <{{ .Annotations.dashboard_url }}|Open in Grafana>{{ end }}
+          {{ end }}
+        send_resolved: true

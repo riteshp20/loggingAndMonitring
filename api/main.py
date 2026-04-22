@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import KAFKA_BROKERS, KAFKA_ANOMALY_TOPIC, KAFKA_CONSUMER_GROUP_SSE
 from deps import get_os_client, get_redis
 from middleware import RateLimitMiddleware, TraceLoggingMiddleware
+from metrics import PrometheusMiddleware, metrics_endpoint
 from routers import anomalies, logs, reports, services, silence, stream
 from routers.stream import kafka_consumer_task
 
@@ -57,7 +58,8 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-# Middleware order: outermost first — logging wraps rate-limit wraps CORS
+# Middleware order: outermost first — Prometheus wraps logging wraps rate-limit wraps CORS
+app.add_middleware(PrometheusMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(TraceLoggingMiddleware)
 app.add_middleware(
@@ -74,6 +76,8 @@ app.include_router(anomalies.router)
 app.include_router(reports.router)
 app.include_router(logs.router)
 app.include_router(stream.router)
+
+app.add_route("/metrics", metrics_endpoint, include_in_schema=False)
 
 
 @app.get("/api/health", tags=["health"], summary="Liveness + readiness probe")

@@ -9,6 +9,7 @@ AnomalyDetectionPipeline — single entry point that orchestrates all four phase
 call process_window() once per ServiceWindowAggregate received from processed-logs.
 """
 
+import time
 from dataclasses import asdict
 from typing import Optional
 
@@ -17,6 +18,12 @@ from detection.detector import TwoTierDetector
 from suppression.suppressor import AlertSuppressor
 from events.emitter import AnomalyEventEmitter
 from events.models import AnomalyEvent
+from metrics import (
+    ANOMALIES_DETECTED,
+    MODEL_INFERENCE_LATENCY,
+    PROCESSING_LATENCY,
+    SUPPRESSED_ALERTS,
+)
 
 
 class AnomalyDetectionPipeline:
@@ -51,8 +58,15 @@ class AnomalyDetectionPipeline:
         2. Suppress — AlertSuppressor applies cooldown + storm coalescing.
         3. Emit    — Build the appropriate AnomalyEvent and publish to Kafka.
         """
-        # — 1. Detection —————————————————————————————————————————————————————
+        pipeline_start = time.perf_counter()
+
+        # — 1. Detection (timed separately for model inference metric) ————————
+        t_detect_start = time.perf_counter()
         detection = self.detector.detect(service, features)
+        MODEL_INFERENCE_LATENCY.labels(service=service).observe(
+            time.perf_counter() - t_detect_start
+        )
+
         if not detection.is_anomaly:
             return None
 
@@ -60,6 +74,9 @@ class AnomalyDetectionPipeline:
         suppress = self.suppressor.check_and_suppress(service)
 
         if not suppress.allowed and not suppress.is_storm:
+            # Determine reason from verdict (cooldown vs storm_active)
+            reason = "storm_active" if getattr(suppress, "reason", None) == "storm_active" else "cooldown"
+            SUPPRESSED_ALERTS.labels(service=service, reason=reason).inc()
             return None  # cooldown or storm_active
 
         # — 3. Fetch baselines for all numeric metrics ————————————————————————
@@ -85,4 +102,14 @@ class AnomalyDetectionPipeline:
             )
 
         self.emitter.emit(event)
+
+        ANOMALIES_DETECTED.labels(
+            service=event.service,
+            verdict_reason=event.anomaly_type,
+            severity=event.severity,
+        ).inc()
+        PROCESSING_LATENCY.labels(service=service).observe(
+            time.perf_counter() - pipeline_start
+        )
+
         return event

@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 
 from report.models import IncidentReport
 from alert_router.pagerduty.models import PagerDutyAction, pd_severity
+from metrics import PAGERDUTY_API_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -141,14 +142,17 @@ class PagerDutyClient:
     # ── HTTP ──────────────────────────────────────────────────────────────────
 
     def _send(self, payload: dict) -> bool:
+        action = payload.get("event_action", "unknown")
         try:
             self._post_fn(_EVENTS_URL, payload)
             return True
         except urllib.error.HTTPError as exc:
             logger.error("PagerDuty HTTP %d for dedup_key=%s: %s",
                          exc.code, payload.get("dedup_key"), exc.reason)
+            PAGERDUTY_API_ERRORS.labels(action=action).inc()
             return False
         except Exception as exc:
             logger.error("PagerDuty send failed for dedup_key=%s: %s",
                          payload.get("dedup_key"), exc)
+            PAGERDUTY_API_ERRORS.labels(action=action).inc()
             return False

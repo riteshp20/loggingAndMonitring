@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import signal
+import time
 
 from kafka import KafkaConsumer
 
@@ -35,6 +36,11 @@ from alert_router.pagerduty.client import PagerDutyClient
 from alert_router.rate_limiter import RateLimiter
 from alert_router.router import AlertRouter
 from alert_router.slack.notifier import SlackNotifier
+from metrics import (
+    REPORT_PIPELINE_LATENCY,
+    REPORTS_GENERATED,
+    start_metrics_server,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,6 +100,8 @@ def main() -> None:
     if pd_client is None:
         logger.warning("PAGERDUTY_ROUTING_KEY not set — PagerDuty alerts disabled")
 
+    start_metrics_server()
+
     # ── ensure index exists ───────────────────────────────────────────────
     store.ensure_index()
 
@@ -130,8 +138,17 @@ def main() -> None:
                     if not running:
                         break
                     try:
+                        svc = msg.value.get("service", "unknown")
+                        t0 = time.perf_counter()
                         report = pipeline.process(msg.value)
                         if report is not None:
+                            REPORT_PIPELINE_LATENCY.labels(service=svc).observe(
+                                time.perf_counter() - t0
+                            )
+                            REPORTS_GENERATED.labels(
+                                service=report.service,
+                                ai_generated=str(report.ai_generated).lower(),
+                            ).inc()
                             dispatcher.dispatch(report)
                     except Exception as exc:
                         logger.error(
