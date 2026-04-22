@@ -1,5 +1,5 @@
 opensearch-py>=2.4.0
-kafka-python==2.0.2
+kafka-python==2.3.1
 anthropic>=0.40.0
 slack-sdk>=3.26.0
 prometheus-client>=0.20.0
