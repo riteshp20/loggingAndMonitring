@@ -3,9 +3,9 @@ package com.logagent.operators;
 import com.logagent.model.LogLevel;
 import com.logagent.model.NormalizedLogEvent;
 import com.logagent.model.RawLogEvent;
-import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.Counter;
+import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 import org.slf4j.Logger;
@@ -32,13 +32,19 @@ import java.util.Map;
  * </ol>
  *
  * <h3>Error handling</h3>
- * Records with deserialization errors from {@link com.logagent.deserialization.RawLogDeserializer}
- * are emitted to the {@link #DEAD_LETTER_TAG} side output.  All other normalisation
- * errors are logged and counted; the record is emitted with best-effort values
- * so downstream windows still count it.
+ * Records that failed JSON deserialization (flagged by
+ * {@link com.logagent.deserialization.RawLogDeserializer}) are routed to the
+ * {@link #DEAD_LETTER_TAG} side output via {@code ctx.output()} so they land
+ * in the {@code dead-letter-logs} Kafka topic for manual inspection and replay.
+ * All other normalisation errors are logged and counted; a degraded record is
+ * emitted so downstream windows still receive the correct event count.
+ *
+ * <p>Using {@link ProcessFunction} (rather than {@code RichFlatMapFunction}) is
+ * necessary because only {@code ProcessFunction.Context} exposes
+ * {@code ctx.output(OutputTag, value)} for side outputs.
  */
 public class LogNormalizationFunction
-        extends RichFlatMapFunction<RawLogEvent, NormalizedLogEvent> {
+        extends ProcessFunction<RawLogEvent, NormalizedLogEvent> {
 
     private static final Logger LOG = LoggerFactory.getLogger(LogNormalizationFunction.class);
 
@@ -69,11 +75,14 @@ public class LogNormalizationFunction
     }
 
     @Override
-    public void flatMap(RawLogEvent raw, Collector<NormalizedLogEvent> out) {
-        // Records that failed JSON deserialization go straight to dead letter
+    public void processElement(RawLogEvent raw, Context ctx, Collector<NormalizedLogEvent> out) {
+        // Records that failed JSON deserialization go to the dead-letter side output
+        // so they land in the dead-letter-logs Kafka topic for replay rather than
+        // being silently dropped.
         if (raw.getDeserializationError() != null) {
             deadLetterCount.inc();
-            return;   // ctx.output() is not available in flatMap; handled in StreamingJob via ProcessFunction
+            ctx.output(DEAD_LETTER_TAG, raw);
+            return;
         }
 
         try {
@@ -162,7 +171,6 @@ public class LogNormalizationFunction
      * Extracts HTTP request duration from the nested {@code extra.http} map
      * that the log-generator and many frameworks produce.
      */
-    @SuppressWarnings("unchecked")
     private Long extractLatencyMs(RawLogEvent r) {
         Map<String, Object> extra = r.getExtra();
         if (extra == null) return null;

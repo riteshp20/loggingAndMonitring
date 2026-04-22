@@ -39,7 +39,12 @@ import java.time.Duration;
  *  KafkaSource[raw-logs]
  *      │
  *      ▼  WatermarkStrategy (bounded out-of-order, 30 s)
- *  flatMap: LogNormalizationFunction
+ *  process: LogNormalizationFunction
+ *      │
+ *      ├──[DL-1] sideOutput(DEAD_LETTER_TAG) → KafkaSink[dead-letter-logs]
+ *      │         JSON parse / deserialization failures
+ *      │
+ *      ▼  assignTimestampsAndWatermarks (event-time from parsed log payload)
  *      │
  *      ├──[A] KafkaSink[processed-logs]          — individual normalised events
  *      │
@@ -47,7 +52,7 @@ import java.time.Duration;
  *                 │
  *             TumblingEventTimeWindows(1 min)
  *             allowedLateness(30 s)
- *             sideOutput → dead-letter-late
+ *             sideOutput → LATE_EVENTS_TAG
  *                 │
  *             aggregate(ServiceWindowAggregator, WindowResultFunction)
  *                 │
@@ -55,8 +60,9 @@ import java.time.Duration;
  *                 └──[D] OpenSearchBulkSink              — logs-aggregates-YYYY.MM.dd index
  *
  *  Dead-letter paths:
- *      normalization failures → counted metric only (record is degraded, not dropped)
- *      late events (past allowedLateness) → KafkaSink[dead-letter-logs]
+ *      [DL-1] JSON deserialization errors → KafkaSink[dead-letter-logs]  (parse-errors)
+ *      [DL-2] Late events past allowedLateness → KafkaSink[dead-letter-logs]  (late-events)
+ *      Normalisation soft-errors → degraded record emitted; normalization_errors counter
  * </pre>
  *
  * <h2>Checkpointing</h2>
@@ -111,6 +117,23 @@ public class StreamingJob {
                 .uid("kafka-source-raw-logs");
 
         // ── Normalisation ─────────────────────────────────────────────────────
+        // ProcessFunction is required (not flatMap) so that ctx.output() can
+        // route deserialization-error records to the DEAD_LETTER_TAG side output.
+        SingleOutputStreamOperator<NormalizedLogEvent> normalizeOp = rawStream
+                .process(new LogNormalizationFunction())
+                .name("normalize-log-schema")
+                .uid("normalize-log-schema");
+
+        // ── Sink: normalization dead-letters → dead-letter-logs ───────────────
+        // Records that failed JSON deserialization land here for manual replay.
+        // Wired before assignTimestampsAndWatermarks because getSideOutput() must
+        // be called on the operator that produced the tag, not a downstream node.
+        normalizeOp
+                .getSideOutput(LogNormalizationFunction.DEAD_LETTER_TAG)
+                .sinkTo(buildKafkaJsonSink(config, config.getDeadLetterTopic()))
+                .name("kafka-sink[dead-letter-logs/parse-errors]")
+                .uid("kafka-sink-dead-letter-parse-errors");
+
         // Re-assign watermarks after normalisation using the parsed event timestamp
         // from the log payload itself — this is the "real" event time.
         WatermarkStrategy<NormalizedLogEvent> normalizedWatermarks = WatermarkStrategy
@@ -119,10 +142,7 @@ public class StreamingJob {
                 .withTimestampAssigner((event, ts) -> event.getTimestampMs())
                 .withIdleness(Duration.ofMinutes(5));
 
-        SingleOutputStreamOperator<NormalizedLogEvent> normalizedStream = rawStream
-                .flatMap(new LogNormalizationFunction())
-                .name("normalize-log-schema")
-                .uid("normalize-log-schema")
+        SingleOutputStreamOperator<NormalizedLogEvent> normalizedStream = normalizeOp
                 .assignTimestampsAndWatermarks(normalizedWatermarks)
                 .name("watermark-normalized")
                 .uid("watermark-normalized");
