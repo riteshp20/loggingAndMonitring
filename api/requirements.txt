@@ -1,4 +1,4 @@
-fastapi>=0.111.0
+fastapi>=0.136.1
 uvicorn[standard]>=0.29.0
 opensearch-py[async]>=2.4.0
 redis>=5.0.0
