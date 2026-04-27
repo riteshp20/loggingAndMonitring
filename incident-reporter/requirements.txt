@@ -1,7 +1,7 @@
 opensearch-py>=2.4.0
 kafka-python==2.0.2
 anthropic>=0.40.0
-slack-sdk>=3.26.0
+slack-sdk>=3.41.0
 prometheus-client>=0.20.0
 pytest==8.2.2
 pytest-mock==3.14.0
