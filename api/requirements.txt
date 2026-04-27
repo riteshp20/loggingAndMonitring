@@ -3,6 +3,6 @@ uvicorn[standard]>=0.29.0
 opensearch-py[async]>=2.4.0
 redis>=5.0.0
 PyJWT>=2.8.0
-python-dateutil>=2.9.0
+python-dateutil>=2.9.0.post0
 aiokafka>=0.11.0
 prometheus-client>=0.20.0
