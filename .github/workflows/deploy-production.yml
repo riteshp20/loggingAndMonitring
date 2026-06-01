@@ -50,7 +50,7 @@ jobs:
       short_sha: ${{ steps.parse.outputs.short_sha }}
       is_rc:     ${{ steps.parse.outputs.is_rc }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -95,7 +95,7 @@ jobs:
 
     steps:
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -148,10 +148,10 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -163,7 +163,7 @@ jobs:
             --region ${{ env.AWS_REGION }}
 
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.15.2
 
@@ -240,7 +240,7 @@ jobs:
     steps:
       - name: Success notification
         if: needs.deploy-production.result == 'success'
-        uses: slackapi/slack-github-action@v1
+        uses: slackapi/slack-github-action@v3
         with:
           payload: |
             {
@@ -263,7 +263,7 @@ jobs:
 
       - name: Failure notification
         if: needs.deploy-production.result != 'success'
-        uses: slackapi/slack-github-action@v1
+        uses: slackapi/slack-github-action@v3
         with:
           payload: |
             {
@@ -285,7 +285,7 @@ jobs:
 
       - name: Create GitHub release
         if: needs.deploy-production.result == 'success' && needs.validate-tag.outputs.is_rc == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.validate-tag.outputs.version }}
           name: v${{ needs.validate-tag.outputs.version }}
