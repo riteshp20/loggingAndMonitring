@@ -24,7 +24,7 @@
 
         <!-- Jackson — must stay in the fat JAR and be relocated to avoid clashing
              with the version bundled in the Flink cluster classpath. -->
-        <jackson.version>2.16.1</jackson.version>
+        <jackson.version>2.21.2</jackson.version>
 
         <!-- OpenSearch — we use the low-level REST client directly (no HLRC)
              to avoid transitive dependency conflicts with Flink's httpclient. -->
